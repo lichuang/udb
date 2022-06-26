@@ -1,0 +1,18 @@
+#ifndef _UDB_H_
+#define _UDB_H_
+
+typedef struct udb_config_t {
+  const char *db_path;
+  unsigned int page_size;
+} udb_config_t;
+
+typedef struct udb_t {
+  udb_config_t config;
+} udb_t;
+
+typedef enum udb_err_t {
+  UDB_OK = 0,   /* Success */
+  UDB_OOM = -1, /* out of memory */
+} udb_err_t;
+
+#endif /* _UDB_H_ */
