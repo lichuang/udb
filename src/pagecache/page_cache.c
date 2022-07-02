@@ -1,9 +1,9 @@
 #include <assert.h>
 #include <stdio.h>
 
-#include "alloc.h"
+#include "memory/alloc.h"
 #include "page.h"
-#include "page_cache.h"
+#include "pagecache/page_cache.h"
 
 struct page_cache_t {
   page_t *dirty, *dirty_tail;
@@ -16,14 +16,22 @@ struct page_cache_t {
 /* Outer function implementations */
 
 udb_err_t cache_open(page_cache_t **cache, cache_methods_t *methods) {
+  assert(methods != NULL);
+
   udb_err_t err = UDB_OK;
   page_cache_t *ret_cache = NULL;
+
+  err = methods->Init(methods);
+  if (err != UDB_OK) {
+    return err;
+  }
 
   *cache = ret_cache = (page_cache_t *)udb_calloc(sizeof(page_cache_t));
   if (ret_cache == NULL) {
     return UDB_OOM;
   }
 
+  ret_cache->methods = methods;
   return err;
 }
 

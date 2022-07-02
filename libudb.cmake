@@ -1,8 +1,10 @@
 set(libudb_files
+  src/misc/error.c
+  src/global.c
   src/page.c
-  src/pager.c
-  src/page_cache.c
-  src/default_cache_methods.c
+  src/pagecache/pager.c
+  src/pagecache/page_cache.c
+  src/pagecache/default_cache_methods.c
 )
 
 add_library(udb 

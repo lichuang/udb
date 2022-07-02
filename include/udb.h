@@ -11,8 +11,9 @@ typedef struct udb_t {
 } udb_t;
 
 typedef enum udb_err_t {
-  UDB_OK = 0,   /* Success */
-  UDB_OOM = -1, /* out of memory */
+  UDB_OK = 0,      /* Success */
+  UDB_OOM = -1,    /* out of memory */
+  UDB_MISUSE = -2, /* Library used incorrectly */
 } udb_err_t;
 
 #endif /* _UDB_H_ */

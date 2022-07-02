@@ -10,6 +10,12 @@ struct cache_item_t {
   void *extra; /* Extra information associated with the page */
 };
 
+struct cache_config_t {
+  unsigned int page_size;
+  unsigned int cache_size;
+  unsigned int extra;
+};
+
 /*
 ** Whether or not a new page may be allocated if the page not found.
 ** 0 means do not allocate a new page.
@@ -24,15 +30,16 @@ typedef enum cache_create_flag_t {
 
 struct cache_methods_t {
   int version;
-  void *arg;
-  int (*Init)(void *);
+  cache_arg_t *arg;
+
+  udb_err_t (*Init)(void *, cache_config_t *);
   void (*Shutdown)(void *);
 
-  cache_item_t *(*Fetch)(cache_methods_t *, page_id_t key,
+  cache_item_t *(*Fetch)(cache_arg_t *, page_id_t key,
                          cache_create_flag_t flag);
 };
 
-extern cache_methods_t *default_cache_methods;
+extern cache_methods_t default_cache_methods;
 
 /*
 ** A page is pinned if it is not on the LRU list.  To be "pinned" means
@@ -48,5 +55,7 @@ page_t *cache_fetch(page_cache_t *, page_id_t, cache_create_flag_t);
 udb_err_t cache_fetch_stress(page_cache_t *, page_id_t, page_t **);
 page_t *cache_fetch_finish(page_cache_t *, page_id_t, page_t *);
 void cache_drop(page_cache_t *, page_t *);
+
+void cache_use_default_methods();
 
 #endif /* _UDB_PAGE_CACHE_H_ */

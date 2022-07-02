@@ -1,12 +1,12 @@
 #include <assert.h>
 #include <stdio.h>
 
-#include "alloc.h"
-#include "file.h"
+#include "bplustree/wal.h"
+#include "memory/alloc.h"
+#include "os/file.h"
 #include "page.h"
-#include "page_cache.h"
-#include "pager.h"
-#include "wal.h"
+#include "pagecache/page_cache.h"
+#include "pagecache/pager.h"
 
 /*
  ** Index types of pager.stat[] array.
@@ -58,7 +58,7 @@ udb_err_t pager_open(udb_t *udb, pager_t **pager) {
   }
 
   *pager = ret_pager = udb_calloc(sizeof(pager_t));
-  err = cache_open(&cache, default_cache_methods);
+  err = cache_open(&cache, &default_cache_methods);
   if (err != UDB_OK) {
     goto open_pager_error;
   }
