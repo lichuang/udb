@@ -3,6 +3,7 @@
 
 #include "types.h"
 
+void *udb_alloc(uint32_t size);
 void *udb_calloc(uint32_t size);
 void udb_free(void *);
 

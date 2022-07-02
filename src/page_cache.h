@@ -41,12 +41,12 @@ extern cache_methods_t *default_cache_methods;
 #define ITEM_IS_PINNED(p) ((p)->lru_next == NULL)
 #define ITEM_IS_UNPINNED(p) ((p)->lru_next != NULL)
 
-udb_err_t cache_open(cache_t **, cache_methods_t *methods);
-void cache_close(cache_t *);
+udb_err_t cache_open(page_cache_t **, cache_methods_t *methods);
+void cache_close(page_cache_t *);
 
-page_t *cache_fetch(cache_t *, page_id_t, cache_create_flag_t);
-udb_err_t cache_fetch_stress(cache_t *, page_id_t, page_t **);
-page_t *cache_fetch_finish(cache_t *, page_id_t, page_t *);
-void cache_drop(cache_t *, page_t *);
+page_t *cache_fetch(page_cache_t *, page_id_t, cache_create_flag_t);
+udb_err_t cache_fetch_stress(page_cache_t *, page_id_t, page_t **);
+page_t *cache_fetch_finish(page_cache_t *, page_id_t, page_t *);
+void cache_drop(page_cache_t *, page_t *);
 
 #endif /* _UDB_PAGE_CACHE_H_ */

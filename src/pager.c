@@ -23,7 +23,7 @@ enum pager_stat_t {
 struct pager_t {
   udb_t *udb;
 
-  cache_t *cache;
+  page_cache_t *cache;
 
   wal_t *wal;
 
@@ -45,7 +45,7 @@ udb_err_t pager_open(udb_t *udb, pager_t **pager) {
   pager_t *ret_pager;
   file_t *db_file = NULL;
   wal_t *wal = NULL;
-  cache_t *cache = NULL;
+  page_cache_t *cache = NULL;
   udb_err_t err = UDB_OK;
 
   err = udb_file_open(db_path, 0, &db_file);
@@ -58,7 +58,7 @@ udb_err_t pager_open(udb_t *udb, pager_t **pager) {
   }
 
   *pager = ret_pager = udb_calloc(sizeof(pager_t));
-  err = cache_open(&cache);
+  err = cache_open(&cache, default_cache_methods);
   if (err != UDB_OK) {
     goto open_pager_error;
   }
@@ -93,13 +93,13 @@ udb_err_t pager_close(pager_t *pager) {
 udb_err_t pager_get_page(pager_t *pager, page_id_t id, page_t **page) {
   page_t *pg = NULL;
   page_t *item = NULL;
-  cache_t *cache = pager->cache;
+  page_cache_t *cache = pager->cache;
   udb_err_t err = UDB_OK;
 
   assert(id > 0);
 
   *page = NULL;
-  item = cache_fetch(cache, id);
+  item = cache_fetch(cache, id, CACHE_CREATE_FLAG_DONOT_CREATE);
   if (item == NULL) {
     err = cache_fetch_stress(cache, id, &item);
     if (err != UDB_OK) {

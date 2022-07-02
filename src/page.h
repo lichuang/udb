@@ -18,7 +18,7 @@ struct page_t {
 
   pager_t *pager;
 
-  cache_t *cache; /* Cache that owns this page */
+  page_cache_t *cache; /* Cache that owns this page */
   uint16_t flags;
 
   uint16_t ref; /* Number of reference count of this page */
