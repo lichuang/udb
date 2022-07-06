@@ -29,7 +29,7 @@ struct pager_t {
 
   file_t *db_file; /* the db file fd */
 
-  unsigned int page_size;
+  unsigned int pageSize;
 
   uint32_t stat[PAGER_STAT_MAX]; /* page cache statistics array */
 };
@@ -58,7 +58,7 @@ udb_err_t pager_open(udb_t *udb, pager_t **pager) {
   }
 
   *pager = ret_pager = udb_calloc(sizeof(pager_t));
-  err = cache_open(&cache, &default_cache_methods);
+  err = cache_open(&cache);
   if (err != UDB_OK) {
     goto open_pager_error;
   }
@@ -67,7 +67,7 @@ udb_err_t pager_open(udb_t *udb, pager_t **pager) {
   ret_pager->wal = wal;
   ret_pager->cache = cache;
   ret_pager->udb = udb;
-  ret_pager->page_size = udb->config.page_size;
+  ret_pager->pageSize = udb->config.pageSize;
 
   return UDB_OK;
 
@@ -150,7 +150,7 @@ get_page_error:
  ** Convert the page id to database file offset.
  */
 static inline offset_t from_page_id_to_offset(pager_t *pager, page_id_t id) {
-  return (id - 1) * pager->page_size;
+  return (id - 1) * pager->pageSize;
 }
 
 /*
@@ -172,11 +172,11 @@ static udb_err_t read_db_page(page_t *page) {
 
   if (IS_VALID_WAL_FRAME(frame)) {
     /* In this case the current page in the wal frame, just read it from wal */
-    err = wal_read_frame(wal, frame, pager->page_size, page->data);
+    err = wal_read_frame(wal, frame, pager->pageSize, page->data);
   } else {
     /* Read the page from database file */
     offset = from_page_id_to_offset(pager, id);
-    err = udb_file_read(db, page->data, pager->page_size, offset);
+    err = udb_file_read(db, page->data, pager->pageSize, offset);
   }
 
   if (err != UDB_OK) {

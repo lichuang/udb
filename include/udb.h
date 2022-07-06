@@ -3,7 +3,7 @@
 
 typedef struct udb_config_t {
   const char *db_path;
-  unsigned int page_size;
+  unsigned int pageSize;
 } udb_config_t;
 
 typedef struct udb_t {

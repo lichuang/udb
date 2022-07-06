@@ -5,4 +5,7 @@
 
 bool mutex_held(mutex_t *);
 
+void mutex_enter(mutex_t *);
+void mutex_leave(mutex_t *);
+
 #endif /* _UDB_MUTEX_H_ */

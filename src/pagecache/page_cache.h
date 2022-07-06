@@ -6,14 +6,13 @@
 #include "types.h"
 
 struct cache_item_t {
-  void *buf;   /* The content of the page */
-  void *extra; /* Extra information associated with the page */
+  void *buf;       /* The content of the page */
+  void *extraSize; /* Extra information associated with the page */
 };
 
-struct cache_config_t {
-  unsigned int page_size;
-  unsigned int cache_size;
-  unsigned int extra;
+struct cache_module_config_t {
+  unsigned int pageSize;
+  unsigned int extraSize;
 };
 
 /*
@@ -30,13 +29,15 @@ typedef enum cache_create_flag_t {
 
 struct cache_methods_t {
   int version;
-  cache_arg_t *arg;
+  void *arg;
 
-  udb_err_t (*Init)(void *, cache_config_t *);
+  udb_err_t (*Init)(void *);
   void (*Shutdown)(void *);
 
-  cache_item_t *(*Fetch)(cache_arg_t *, page_id_t key,
+  cache_module_t *(*Create)(cache_module_config_t *);
+  cache_item_t *(*Fetch)(cache_module_t *, page_id_t key,
                          cache_create_flag_t flag);
+  void (*Destroy)(cache_module_t *);
 };
 
 extern cache_methods_t default_cache_methods;
@@ -45,10 +46,10 @@ extern cache_methods_t default_cache_methods;
 ** A page is pinned if it is not on the LRU list.  To be "pinned" means
 ** that the page is in active use and must not be deallocated.
 */
-#define ITEM_IS_PINNED(p) ((p)->lru_next == NULL)
-#define ITEM_IS_UNPINNED(p) ((p)->lru_next != NULL)
+#define ITEM_IS_PINNED(p) ((p)->lruNext == NULL)
+#define ITEM_IS_UNPINNED(p) ((p)->lruNext != NULL)
 
-udb_err_t cache_open(page_cache_t **, cache_methods_t *methods);
+udb_err_t cache_open(page_cache_t **);
 void cache_close(page_cache_t *);
 
 page_t *cache_fetch(page_cache_t *, page_id_t, cache_create_flag_t);
