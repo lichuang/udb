@@ -85,6 +85,7 @@ struct default_cache_t {
   uint32_t slotNum;            /* Number of slots in hash[] */
   default_cache_item_t **hash; /* Hash table for lookup by key */
   default_cache_item_t *free;  /* List of unused pcache-local pages */
+  void *bulk;                  /* Bulk memory used by pcache-local */
 };
 
 /*
@@ -149,63 +150,134 @@ static cache_item_t *default_cache_fetch(cache_module_t *arg, page_id_t key,
 
 /* Static internal function forward declarations */
 
-static void __calc_group_max_pinned_item_num(default_cache_group_t *);
-static inline __calc_cache_is_under_memory_pressure();
-static bool is_cache_under_memory_pressure(default_cache_t *cache);
-static bool is_cache_nearly_full(default_cache_t *cache);
+static default_cache_item_t *__init_item_with_key(default_cache_t *, page_id_t,
+                                                  default_cache_item_t *);
+static default_cache_item_t *__init_item_from_buffer(default_cache_t *, void *,
+                                                     bool);
+static inline void __calc_group_max_pinned_item_num(default_cache_group_t *);
+static inline void __calc_cache_is_under_memory_pressure();
+static inline bool __is_cache_under_memory_pressure(default_cache_t *cache);
+static bool __is_cache_nearly_full(default_cache_t *cache);
 
-static void resize_hash(default_cache_t *);
-static default_cache_item_t *try_recycle_item(default_cache_t *cache);
-static void remove_from_hash(default_cache_item_t *, bool __free_cache_item);
+static default_cache_item_t *__pin_item(default_cache_item_t *);
+static default_cache_item_t *__try_recycle_item(default_cache_t *cache);
+
 static default_cache_item_t *__alloc_cache_item(default_cache_t *, bool);
 static void __free_cache_item(default_cache_item_t *);
-static default_cache_item_t *init_item(default_cache_t *, page_id_t,
-                                       default_cache_item_t *);
+
+static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *,
+                                                   page_id_t key,
+                                                   cache_create_flag_t flag);
+
+static default_cache_item_t *__fetch_item_stage2(default_cache_t *cache,
+                                                 page_id_t key,
+                                                 cache_create_flag_t flags);
+
 static bool __cache_init_bulk(default_cache_t *);
-
-static default_cache_item_t *pin_item(default_cache_item_t *);
-
-static default_cache_item_t *fetch_no_mutex(default_cache_t *, page_id_t key,
-                                            cache_create_flag_t flag);
-
-static default_cache_item_t *fetch_stage2(default_cache_t *cache, page_id_t key,
-                                          cache_create_flag_t flags);
-
 static void *__cache_alloc_buffer(int);
 static void __cache_free_buffer(void *);
-static void cache_truncate_unsafe(default_cache_t *, page_id_t);
+static void __cache_truncate_unsafe(default_cache_t *, page_id_t);
+static void __cache_enforce_max_item(default_cache_t *);
+
+static void __remove_item_from_hash(default_cache_item_t *,
+                                    bool __free_cache_item);
 static void __cache_resize_hash(default_cache_t *cache);
 
 /* Static function implementations */
+
+static default_cache_item_t *__init_item_with_key(default_cache_t *cache,
+                                                  page_id_t key,
+                                                  default_cache_item_t *item) {
+  assert(cache != NULL);
+  assert(item != NULL);
+
+  uint32_t h = key % cache->slotNum;
+  cache->itemNum += 1;
+  item->key = key;
+  item->next = cache->hash[h];
+  item->cache = cache;
+  item->lruNext = NULL;
+  *(void **)item->base.extra = NULL;
+  cache->hash[h] = item;
+  if (key > cache->maxKey) {
+    cache->maxKey = key;
+  }
+
+  return item;
+}
+
+static default_cache_item_t *
+__init_item_from_buffer(default_cache_t *cache, void *p, bool isBulkLocal) {
+  default_cache_item_t *item = NULL;
+  item = (default_cache_item_t *)&((unsigned char *)p)[cache->pageSize];
+  item->base.buf = p;
+  item->base.extra = &item[1];
+  item->isBulkLocal = isBulkLocal;
+  item->isAnchor = false;
+  item->lruPrev = NULL;
+
+  return item;
+}
 
 static inline void
 __calc_group_max_pinned_item_num(default_cache_group_t *group) {
   group->maxPinnedItem = group->maxItemNum + 10 - group->minItemNum;
 }
 
-static inline __calc_cache_is_under_memory_pressure() {
+static inline void __calc_cache_is_under_memory_pressure() {
   defaultCacheGlobal.underPressure =
       defaultCacheGlobal.freeSlotNum < defaultCacheGlobal.reserved;
 }
 
-static bool is_cache_under_memory_pressure(default_cache_t *cache) {
-  return false;
+static inline bool __is_cache_under_memory_pressure(default_cache_t *cache) {
+  return defaultCacheGlobal.underPressure;
 }
 
-static bool is_cache_nearly_full(default_cache_t *cache) {
-  uint32_t pinned_num;
+static bool __is_cache_nearly_full(default_cache_t *cache) {
+  uint32_t pinnedNum;
   default_cache_group_t *group = cache->group;
 
   assert(cache->itemNum >= cache->recyclable);
+  assert(group->maxPinnedItem == group->maxItemNum + 10 - group->minItemNum);
+  assert(cache->max90Percent == cache->maxItemNum * 9 / 10);
 
-  pinned_num = cache->itemNum - cache->recyclable;
-  return ((pinned_num >= group->maxPinnedItem ||
-           pinned_num >= cache->max90Percent) ||
-          (is_cache_under_memory_pressure(cache) &&
-           cache->recyclable < pinned_num));
+  pinnedNum = cache->itemNum - cache->recyclable;
+  return (
+      (pinnedNum >= group->maxPinnedItem || pinnedNum >= cache->max90Percent) ||
+      (__is_cache_under_memory_pressure(cache) &&
+       cache->recyclable < pinnedNum));
 }
 
-static default_cache_item_t *try_recycle_item(default_cache_t *cache) {
+/*
+** This function is used internally to remove the item from the
+** default_cache_group_t LRU list, if is part of it. If item is not part of
+*the
+** group LRU list, then this function is a no-op.
+**
+** The default_cache_group_t mutex must be held when this function is called.
+*/
+static default_cache_item_t *__pin_item(default_cache_item_t *item) {
+  assert(item != NULL);
+  assert(ITEM_IS_UNPINNED(item));
+  assert(item->lruNext);
+  assert(item->lruPrev);
+  aseert(mutex_held(item->cache->group->mutex));
+
+  /* Remove the item from the LRU list */
+  item->lruNext->lruPrev = item->lruPrev;
+  item->lruPrev->lruNext = item->lruNext;
+
+  item->lruNext = item->lruPrev = NULL;
+
+  assert(!item->isAnchor);
+  assert(item->cache->group->lru.isAnchor);
+
+  item->cache->recyclable -= 1;
+
+  return item;
+}
+
+static default_cache_item_t *__try_recycle_item(default_cache_t *cache) {
   default_cache_group_t *group = cache->group;
   default_cache_t *other;
   default_cache_item_t *item = NULL;
@@ -215,48 +287,21 @@ static default_cache_item_t *try_recycle_item(default_cache_t *cache) {
   }
 
   if (cache->itemNum + 1 < cache->maxItemNum &&
-      is_cache_under_memory_pressure(cache)) {
+      __is_cache_under_memory_pressure(cache)) {
     return NULL;
   }
 
   item = group->lru.lruPrev;
   assert(ITEM_IS_UNPINNED(item));
-  remove_from_hash(item, false);
-  pin_item(item);
+  __remove_item_from_hash(item, false);
+  __pin_item(item);
   other = item->cache;
   if (other->itemSize != cache->itemSize) {
     __free_cache_item(item);
     item = NULL;
-  } else {
-    group->purgeableItem -= (other->purgeable - cache->purgeable);
   }
 
   return item;
-}
-
-/*
-** Remove the page supplied as an argument from the hash table
-** (default_cache_t.hash structure) that it is currently stored in.
-** Also free the page if default_cache_t is true.
-**
-** The default_cache_group_t mutex must be held when this function is called.
-*/
-static void remove_from_hash(default_cache_item_t *item, bool free_flag) {
-  default_cache_t *cache = item->cache;
-  uint32_t h;
-  default_cache_item_t **prev_item;
-
-  assert(mutex_held(cache->group->mutex));
-  h = item->key % cache->slotNum;
-  for (prev_item = &cache->hash[h]; (*prev_item) != item;
-       prev_item = &(*prev_item)->next)
-    ;
-  *prev_item = (*prev_item)->next;
-
-  cache->itemNum -= 1;
-  if (free_flag) {
-    __free_cache_item(item);
-  }
 }
 
 /*
@@ -269,33 +314,27 @@ static default_cache_item_t *__alloc_cache_item(default_cache_t *cache,
 
   assert(mutex_held(cache->group->mutex));
 
-  if (cache->free != NULL ||
-      (cache->slotNum == 0 && __cache_init_bulk(cache))) {
+  if (cache->free || (cache->slotNum == 0 && __cache_init_bulk(cache))) {
     assert(cache->free != NULL);
     item = cache->free;
     cache->free = cache->free->next;
     item->next = NULL;
-  } else {
-    if (benignMalloc) {
-      faultBeginBenignMalloc();
-    }
-    p = udb_alloc(cache->itemSize);
-    if (benignMalloc) {
-      faultEndBenignMalloc();
-    }
-    if (p == NULL) {
-      return NULL;
-    }
-    item = (default_cache_item_t *)&((unsigned char *)p)[cache->pageSize];
-    item->base.buf = p;
-    item->base.extra = &item[1];
-    item->isBulkLocal = false;
-    item->isAnchor = false;
-    item->lruPrev = NULL;
+    cache->group->purgeableItem += 1;
+    return item;
+  }
+  if (benignMalloc) {
+    faultBeginBenignMalloc();
+  }
+  p = udb_alloc(cache->itemSize);
+  if (benignMalloc) {
+    faultEndBenignMalloc();
+  }
+  if (p == NULL) {
+    return NULL;
   }
 
   cache->group->purgeableItem += 1;
-  return item;
+  return __init_item_from_buffer(cache, p, false);
 }
 
 /*
@@ -311,55 +350,75 @@ static void __free_cache_item(default_cache_item_t *item) {
   } else {
     __cache_free_buffer(item->base.buf);
   }
+  cache->group->purgeableItem -= 1;
 }
 
-/*
-** Allocate a new item object initially associated with cache.
-*/
-static default_cache_item_t *__alloc_cache_item(default_cache_t *cache) {
-  default_cache_item_t *item;
-  void *data;
+static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *cache,
+                                                   page_id_t key,
+                                                   cache_create_flag_t flag) {
+  default_cache_item_t *item = NULL;
 
-  assert(mutex_held(cache->group->mutex));
-
-  if (cache->free || (cache->itemNum == 0 && __cache_init_bulk(cache))) {
-    assert(cache->free != NULL);
-    /* free the item from free list */
-    item = cache->free;
-    cache->free = item->next;
-    item->next = NULL;
-  } else {
-    data = udb_alloc(cache->itemSize);
-    if (data == NULL) {
-      return NULL;
-    }
-    item = (default_cache_item_t *)&((uint8_t *)data)[cache->pageSize];
-    item->base.buf = data;
-    item->base.extraSize = &item[1];
-    item->isBulkLocal = false;
-    item->isAnchor = false;
-    item->lruPrev = NULL;
-  }
-  cache->group->purgeableItem += 1;
-
-  return item;
-}
-
-static default_cache_item_t *init_item(default_cache_t *cache, page_id_t key,
-                                       default_cache_item_t *item) {
   assert(cache != NULL);
-  assert(item != NULL);
 
-  uint32_t h = key % cache->slotNum;
-  cache->itemNum += 1;
-  item->key = key;
-  item->next = cache->hash[h];
-  item->cache = cache;
-  item->lruNext = NULL;
-  *(void **)item->base.extraSize = NULL;
-  cache->hash[h] = item;
+  /* Step 1: Search the hash table for an existing entry. */
+  item = cache->hash[key % cache->slotNum];
+  while (item && item->key != key) {
+    item = item->next;
+  }
 
-  return item;
+  /* Step 2: If the page was found in the hash table, then return it. */
+  if (item) {
+    if (ITEM_IS_UNPINNED(item)) {
+      return __pin_item(item);
+    }
+    return item;
+  }
+
+  /* If the page was not in the hash table and create_flags is 0, abort. */
+  if (flag == CACHE_CREATE_FLAG_DONOT_CREATE) {
+    return NULL;
+  }
+
+  /*
+  ** Otherwise (page not in hash and create_flags!=0) continue with
+  ** subsequent steps to try to create the page.
+  */
+  return __fetch_item_stage2(cache, key, flag);
+}
+
+static default_cache_item_t *__fetch_item_stage2(default_cache_t *cache,
+                                                 page_id_t key,
+                                                 cache_create_flag_t flag) {
+  default_cache_group_t *group = cache->group;
+  default_cache_item_t *item;
+
+  /* Step 3: Abort if createFlag is 1 but the cache is nearly full */
+  if (flag == CACHE_CREATE_FLAG_EASY_ALLOCATE &&
+      __is_cache_nearly_full(cache)) {
+    return NULL;
+  }
+
+  if (cache->itemNum >= cache->slotNum) {
+    __cache_resize_hash(cache);
+  }
+  assert(cache->slotNum > 0 && cache->hash != NULL);
+
+  /* Step 4. Try to recycle an item. */
+  item = __try_recycle_item(cache);
+
+  /*
+  ** Step 5. If a usable page buffer has still not been found,
+  ** attempt to allocate a new one.
+  */
+  if (item == NULL) {
+    item = __alloc_cache_item(cache, flag == CACHE_CREATE_FLAG_EASY_ALLOCATE);
+  }
+
+  if (item == NULL) {
+    return NULL;
+  }
+
+  return __init_item_with_key(cache, key, item);
 }
 
 /*
@@ -371,8 +430,6 @@ static bool __cache_init_bulk(default_cache_t *cache) {
   int bulkNum;
   char *bulk;
   default_cache_item_t *item;
-
-  assert(defaultCacheGlobal.initItemNum >= 0);
 
   if (defaultCacheGlobal.initItemNum == 0) {
     return false;
@@ -399,13 +456,9 @@ static bool __cache_init_bulk(default_cache_t *cache) {
   /* init the bulk cache items */
   bulkNum = bulkSize / cache->itemSize;
   do {
-    item = (default_cache_item_t *)&bulk[cache->pageSize];
-    item->base.buf = bulk;
-    item->base.extraSize = &item[1];
-    item->isAnchor = false;
-    item->isBulkLocal = true;
+    item = __init_item_from_buffer(cache, bulk, true);
+    /* Link the item to the free list */
     item->next = cache->free;
-    item->lruPrev = NULL;
     cache->free = item;
     bulk += cache->itemSize;
   } while (--bulkNum);
@@ -413,80 +466,14 @@ static bool __cache_init_bulk(default_cache_t *cache) {
   return cache->free != NULL;
 }
 
-static default_cache_item_t *fetch_no_mutex(default_cache_t *cache,
-                                            page_id_t key,
-                                            cache_create_flag_t flag) {
-  default_cache_item_t *item = NULL;
-
-  assert(cache != NULL);
-
-  /* Step 1: Search the hash table for an existing entry. */
-  item = cache->hash[key % cache->slotNum];
-  while (item && item->key != key) {
-    item = item->next;
-  }
-
-  /* Step 2: If the page was found in the hash table, then return it. */
-  if (item) {
-    if (ITEM_IS_UNPINNED(item)) {
-      return pin_item(item);
-    }
-    return item;
-  }
-
-  /* If the page was not in the hash table and create_flags is 0, abort. */
-  if (flag == CACHE_CREATE_FLAG_DONOT_CREATE) {
-    return NULL;
-  }
-
-  /*
-  ** Otherwise (page not in hash and create_flags!=0) continue with
-  ** subsequent steps to try to create the page.
-  */
-  return fetch_stage2(cache, key, flag);
-}
-
-static default_cache_item_t *fetch_stage2(default_cache_t *cache, page_id_t key,
-                                          cache_create_flag_t flag) {
-  default_cache_group_t *group = cache->group;
-  default_cache_item_t *item;
-
-  /* Step 3: Abort if createFlag is 1 but the cache is nearly full */
-  if (flag == CACHE_CREATE_FLAG_EASY_ALLOCATE && is_cache_nearly_full(cache)) {
-    return NULL;
-  }
-
-  if (cache->itemNum >= cache->slotNum) {
-    __cache_resize_hash(cache);
-  }
-  assert(cache->slotNum > 0 && cache->hash != NULL);
-
-  /* Step 4. Try to recycle an item. */
-  item = try_recycle_item(cache);
-
-  /*
-  ** Step 5. If a usable page buffer has still not been found,
-  ** attempt to allocate a new one.
-  */
-  if (item == NULL) {
-    item = __alloc_cache_item(cache);
-  }
-
-  if (item == NULL) {
-    return NULL;
-  }
-
-  return init_item(cache, key, item);
-}
-
 /*
 ** Malloc function used within this file to allocate space from the buffer
-** configured using sqlite3_config(SQLITE_CONFIG_PAGECACHE) option. If no
+** configured using slotSize option. If no
 ** such buffer exists or there is no space left in it, this function falls
-** back to sqlite3Malloc().
+** back to udb_alloc().
 **
 ** Multiple threads can run this routine at the same time.  Global variables
-** in pcache1 need to be protected via mutex.
+** in defaultCacheGlobal need to be protected via mutex.
 */
 static void *__cache_alloc_buffer(int byte) {
   void *p = NULL;
@@ -523,9 +510,9 @@ static void __cache_free_buffer(void *p) {
     slot = (page_free_slot_t *)p;
     slot->next = defaultCacheGlobal.free;
     defaultCacheGlobal.free = slot;
-    defaultCacheGlobal.free += 1;
+    defaultCacheGlobal.freeSlotNum += 1;
     __calc_cache_is_under_memory_pressure();
-    assert(defaultCacheGlobal.free <= defaultCacheGlobal.slotNum);
+    assert(defaultCacheGlobal.freeSlotNum <= defaultCacheGlobal.slotNum);
     mutex_leave(defaultCacheGlobal.mutex);
   } else {
     udb_free(p);
@@ -534,12 +521,12 @@ static void __cache_free_buffer(void *p) {
 
 /*
 ** Discard all pages from cache with a page number (key value)
-** greater than or equal to iLimit. Any pinned pages that meet this
+** greater than or equal to limit. Any pinned pages that meet this
 ** criteria are unpinned before they are discarded.
 **
 ** The default_cache_t mutex must be held when this function is called.
 */
-static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
+static void __cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
   uint32_t h, stop;
 
   assert(mutex_held(cache->group->mutex));
@@ -547,15 +534,19 @@ static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
   assert(cache->slotNum > 0);
 
   if (cache->maxKey - limit < cache->slotNum) {
-    /* If we are just shaving the last few pages off the end of the
+    /*
+     ** If we are just shaving the last few pages off the end of the
      ** cache, then there is no point in scanning the entire hash table.
      ** Only scan those hash slots that might contain pages that need to
-     ** be removed. */
-    h - limit % cache->slotNum;
+     ** be removed.
+     */
+    h = limit % cache->slotNum;
     stop = cache->maxKey - cache->slotNum;
   } else {
-    /* This is the general case where many pages are being removed.
-     ** It is necessary to scan the entire hash table */
+    /*
+     ** This is the general case where many pages are being removed.
+     ** It is necessary to scan the entire hash table
+     */
     h = cache->slotNum / 2;
     stop = h - 1;
   }
@@ -563,6 +554,7 @@ static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
   while (true) {
     default_cache_item_t **pp;
     default_cache_item_t *item;
+    assert(h < cache->slotNum);
     pp = &cache->hash[h];
     /* free the item which key >= limit */
     while ((item = *pp) != NULL) {
@@ -570,7 +562,7 @@ static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
         cache->itemNum -= 1;
         pp = &item->next;
         if (ITEM_IS_UNPINNED(item)) {
-          pin_item(item);
+          __pin_item(item);
         }
         __free_cache_item(item);
       } else {
@@ -581,6 +573,49 @@ static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
       break;
     }
     h = (h + 1) % cache->slotNum;
+  }
+}
+
+static void __cache_enforce_max_item(default_cache_t *cache) {
+  default_cache_group_t *group = cache->group;
+  default_cache_item_t *item = NULL;
+
+  assert(mutex_held(group->mutex));
+  while (group->purgeableItem > group->maxItemNum &&
+         (item = group->lru.lruPrev)->isAnchor == false) {
+    assert(item->cache->group == group);
+    assert(ITEM_IS_UNPINNED(item));
+    __pin_item(item);
+    __remove_item_from_hash(item, true);
+  }
+  if (cache->itemNum == 0 && cache->bulk != NULL) {
+    udb_free(cache->bulk);
+    cache->bulk = cache->free = NULL;
+  }
+}
+
+/*
+** Remove the page supplied as an argument from the hash table
+** (default_cache_t.hash structure) that it is currently stored in.
+** Also free the page if freeFlag is true.
+**
+** The default_cache_group_t mutex must be held when this function is called.
+*/
+static void __remove_item_from_hash(default_cache_item_t *item, bool freeFlag) {
+  default_cache_t *cache = item->cache;
+  uint32_t h;
+  default_cache_item_t **prevItem;
+
+  assert(mutex_held(cache->group->mutex));
+  h = item->key % cache->slotNum;
+  for (prevItem = &cache->hash[h]; (*prevItem) != item;
+       prevItem = &(*prevItem)->next)
+    ;
+  *prevItem = (*prevItem)->next;
+
+  cache->itemNum -= 1;
+  if (freeFlag) {
+    __free_cache_item(item);
   }
 }
 
@@ -603,12 +638,12 @@ static void __cache_resize_hash(default_cache_t *cache) {
   }
 
   defaultCacheLeaveMutex(cache->group);
-  if (cache->hash != NULL) {
+  if (cache->hash) {
     faultBeginBenignMalloc();
   }
 
   newHash = udb_calloc(sizeof(default_cache_item_t **) * newSlotNum);
-  if (cache->hash != NULL) {
+  if (cache->hash) {
     faultEndBenignMalloc();
   }
 
@@ -632,34 +667,6 @@ static void __cache_resize_hash(default_cache_t *cache) {
   udb_free(cache->hash);
   cache->hash = newHash;
   cache->slotNum = newSlotNum;
-}
-
-/*
-** This function is used internally to remove the item from the
-** default_cache_group_t LRU list, if is part of it. If item is not part of the
-** group LRU list, then this function is a no-op.
-**
-** The default_cache_group_t mutex must be held when this function is called.
-*/
-static default_cache_item_t *pin_item(default_cache_item_t *item) {
-  assert(item != NULL);
-  assert(ITEM_IS_UNPINNED(item));
-  assert(item->lruNext);
-  assert(item->lruPrev);
-  aseert(mutex_held(item->cache->group->mutex));
-
-  /* Remove the item from the LRU list */
-  item->lruNext->lruPrev = item->lruPrev;
-  item->lruPrev->lruNext = item->lruNext;
-
-  item->lruNext = item->lruPrev = NULL;
-
-  assert(!item->isAnchor);
-  assert(item->cache->group->lru.isAnchor);
-
-  item->cache->recyclable -= 1;
-
-  return item;
 }
 
 /* The default cache method implementations */
@@ -746,6 +753,7 @@ cache_module_t *default_cache_create(cache_module_config_t *config) {
   }
   if (separateCache) {
     grp = (default_cache_group_t *)&cache[1];
+    grp->maxPinnedItem = 10;
   } else {
     grp = &defaultCacheGlobal.group;
   }
@@ -784,13 +792,14 @@ void default_cache_destroy(cache_module_t *p) {
 
   defaultCacheEnterMutex(grp);
   if (cache->itemNum > 0) {
-    cache_truncate_unsafe(cache, 0);
+    __cache_truncate_unsafe(cache, 0);
   }
   assert(grp->maxItemNum >= cache->maxItemNum);
   grp->maxItemNum -= cache->maxItemNum;
   assert(grp->minItemNum >= cache->minItemNum);
   grp->minItemNum -= cache->minItemNum;
   __calc_group_max_pinned_item_num(grp);
+  __cache_enforce_max_item(cache);
   defaultCacheLeaveMutex(grp);
   udb_free(cache->bulk);
   udb_free(cache->hash);
@@ -803,8 +812,8 @@ void default_cache_destroy(cache_module_t *p) {
 static cache_item_t *default_cache_fetch(cache_module_t *arg, page_id_t key,
                                          cache_create_flag_t flag) {
   /*
-    return (cache_item_t *)fetch_no_mutex((default_cache_t *)method->arg, key,
-                                          flag);
+    return (cache_item_t *)__fetch_item_no_mutex((default_cache_t *)method->arg,
+    key, flag);
                                           */
 }
 
