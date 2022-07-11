@@ -144,9 +144,10 @@ static const uint32_t MIN_HASH_SLOT_NUM = 256;
 udb_err_t default_cache_init(void *);
 void default_cache_shutdown(void *);
 cache_module_t *default_cache_create(cache_module_config_t *);
-void default_cache_destroy(cache_module_t *);
 static cache_item_t *default_cache_fetch(cache_module_t *arg, page_id_t key,
                                          cache_create_flag_t flag);
+void default_cache_unpin(cache_module_t *, cache_item_t *, bool);
+void default_cache_destroy(cache_module_t *);
 
 /* Static internal function forward declarations */
 
@@ -164,6 +165,12 @@ static default_cache_item_t *__try_recycle_item(default_cache_t *cache);
 
 static default_cache_item_t *__alloc_cache_item(default_cache_t *, bool);
 static void __free_cache_item(default_cache_item_t *);
+
+#if DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX
+static default_cache_item_t *__fetch_item_with_mutex(default_cache_t *,
+                                                     page_id_t key,
+                                                     cache_create_flag_t flag);
+#endif
 
 static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *,
                                                    page_id_t key,
@@ -353,6 +360,72 @@ static void __free_cache_item(default_cache_item_t *item) {
   cache->group->purgeableItem -= 1;
 }
 
+#if DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX
+static default_cache_item_t *__fetch_item_with_mutex(default_cache_t *cache,
+                                                     page_id_t key,
+                                                     cache_create_flag_t flag) {
+  default_cache_item_t *item = NULL;
+
+  defaultCacheEnterMutex(cache->group);
+  item = __fetch_item_no_mutex(cache, key, flag);
+  assert(item == NULL || cache->maxKey >= key);
+  defaultCacheLeaveMutex(cache->group);
+  return item;
+}
+#endif
+
+/*
+** Fetch a item by key value.
+**
+** Whether or not a new item may be allocated by this function depends on
+** the value of the flag argument.  0 means do not allocate a new
+** item.  1 means allocate a new item if space is easily available.  2
+** means to try really hard to allocate a new item.
+**
+** There are three different approaches to obtaining space for a item,
+** depending on the value of parameter flag (which may be 0, 1 or 2).
+**
+**   1. Regardless of the value of flag, the cache is searched for a
+**      copy of the requested item. If one is found, it is returned.
+**
+**   2. If flag==0 and the item is not already in the cache, NULL is
+**      returned.
+**
+**   3. If flag is 1, and the item is not already in the cache, then
+**      return NULL (do not allocate a new item) if any of the following
+**      conditions are true:
+**
+**       (a) the number of items pinned by the cache is greater than
+**           default_cache_t.maxItemNum, or
+**
+**       (b) the number of items pinned by the cache is greater than
+**           the sum of nMax for all purgeable caches, less the sum of
+**           nMin for all other purgeable caches, or
+**
+**   4. If none of the first three conditions apply and the cache is marked
+**      as purgeable, and if one of the following is true:
+**
+**       (a) The number of items allocated for the cache is already
+**           default_cache_t.maxItemNum, or
+**
+**       (b) The number of items allocated for all purgeable caches is
+**           already equal to or greater than the sum of nMax for all
+**           purgeable caches,
+**
+**       (c) The system is under memory pressure and wants to avoid
+**           unnecessary items cache entry allocations
+**
+**      then attempt to recycle an item from the LRU list. If it is the right
+**      size, return the recycled buffer. Otherwise, free the buffer and
+**      proceed to step 5.
+**
+**   5. Otherwise, allocate and return a new item buffer.
+**
+** There are two versions of this routine.  __fetch_item_with_mutex() is
+** the general case.  __fetch_item_no_mutex() is a faster implementation for
+** the common case where group->mutex is NULL.  The default_cache_fetch()
+** wrapper invokes the appropriate routine.
+*/
 static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *cache,
                                                    page_id_t key,
                                                    cache_create_flag_t flag) {
@@ -366,7 +439,7 @@ static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *cache,
     item = item->next;
   }
 
-  /* Step 2: If the page was found in the hash table, then return it. */
+  /* Step 2: If the item was found in the hash table, then return it. */
   if (item) {
     if (ITEM_IS_UNPINNED(item)) {
       return __pin_item(item);
@@ -374,14 +447,14 @@ static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *cache,
     return item;
   }
 
-  /* If the page was not in the hash table and create_flags is 0, abort. */
+  /* If the item was not in the hash table and flag is 0, abort. */
   if (flag == CACHE_CREATE_FLAG_DONOT_CREATE) {
     return NULL;
   }
 
   /*
-  ** Otherwise (page not in hash and create_flags!=0) continue with
-  ** subsequent steps to try to create the page.
+  ** Otherwise (page not in hash and flag!=0) continue with
+  ** subsequent steps to try to create the item.
   */
   return __fetch_item_stage2(cache, key, flag);
 }
@@ -783,6 +856,53 @@ cache_module_t *default_cache_create(cache_module_config_t *config) {
 }
 
 /*
+** Implementation of the default_cache_methods.Fetch method.
+*/
+static cache_item_t *default_cache_fetch(cache_module_t *module, page_id_t key,
+                                         cache_create_flag_t flag) {
+  default_cache_t *cache = (default_cache_t *)module;
+  assert(cache->slotNum > 0);
+
+#if DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX
+  if (cache->group->mutex != NULL) {
+    return (cache_item_t *)__fetch_item_with_mutex(cache, key, flag);
+  } else
+#endif
+  {
+    return (cache_item_t *)__fetch_item_no_mutex(cache, key, flag);
+  }
+}
+
+void default_cache_unpin(cache_module_t *module, cache_item_t *p,
+                         bool reuseUnlikely) {
+  default_cache_t *cache = (default_cache_t *)module;
+  default_cache_group_t *grp = cache->group;
+  default_cache_item_t *item = (default_cache_item_t *)p;
+
+  assert(item->cache == cache);
+
+  defaultCacheEnterMutex(grp);
+
+  /* It is an error to call this function if the item is already
+  ** part of the default_cache_group_t LRU list.
+  */
+  assert(item->lruNext == NULL);
+  assert(ITEM_IS_PINNED(item));
+
+  if (reuseUnlikely || grp->purgeableItem > grp->maxItemNum) {
+    __remove_item_from_hash(item, true);
+  } else {
+    /* Add the item to the default_cache_group_t LRU list. */
+    default_cache_item_t **first = &(grp->lru.lruNext);
+    item->lruPrev = &(grp->lru);
+    (item->lruNext = *first)->lruPrev = item;
+    *first = item;
+    cache->recyclable += 1;
+  }
+  defaultCacheLeaveMutex(grp);
+}
+
+/*
 ** Implementation of the default_cache_methods.Destroy method.
 ** Destroy a cache allocated using default_cache_create().
 */
@@ -806,17 +926,6 @@ void default_cache_destroy(cache_module_t *p) {
   udb_free(cache);
 }
 
-/*
-** Implementation of the default_cache_methods.Fetch method.
-*/
-static cache_item_t *default_cache_fetch(cache_module_t *arg, page_id_t key,
-                                         cache_create_flag_t flag) {
-  /*
-    return (cache_item_t *)__fetch_item_no_mutex((default_cache_t *)method->arg,
-    key, flag);
-                                          */
-}
-
 struct cache_methods_t default_cache_methods = {
     1,                      /* version */
     NULL,                   /* arg */
@@ -832,6 +941,7 @@ void cache_use_default_methods() {
       default_cache_init,     /* Init */
       default_cache_shutdown, /* Shutdown */
       default_cache_fetch,    /* Fetch */
+      default_cache_unpin,    /* Unpin */
   };
 
   udb_config(UDB_CONFIG_CACHE_METHOD, &default_cache_methods);

@@ -37,6 +37,7 @@ struct cache_methods_t {
   cache_module_t *(*Create)(cache_module_config_t *);
   cache_item_t *(*Fetch)(cache_module_t *, page_id_t key,
                          cache_create_flag_t flag);
+  void (*Unpin)(cache_module_t *, cache_item_t *, bool);
   void (*Destroy)(cache_module_t *);
 };
 
