@@ -4,6 +4,7 @@
 #include "types.h"
 
 bool mutex_held(mutex_t *);
+bool mutex_not_held(mutex_t *);
 
 void mutex_enter(mutex_t *);
 void mutex_leave(mutex_t *);

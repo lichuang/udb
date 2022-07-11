@@ -6,8 +6,8 @@
 #include "types.h"
 
 struct cache_item_t {
-  void *buf;       /* The content of the page */
-  void *extraSize; /* Extra information associated with the page */
+  void *buf;   /* The content of the page */
+  void *extra; /* Extra information associated with the page */
 };
 
 struct cache_module_config_t {

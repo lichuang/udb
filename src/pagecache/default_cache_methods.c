@@ -88,6 +88,14 @@ struct default_cache_t {
 };
 
 /*
+** Free slots in the allocator used to divide up the global page cache
+** buffer.
+*/
+struct page_free_slot_t {
+  page_free_slot_t *next; /* Next free slot */
+};
+
+/*
 ** Global data used by default cache.
 */
 static struct default_cache_global_t {
@@ -106,9 +114,9 @@ static struct default_cache_global_t {
   int reserved;      /* Try to keep nFreeSlot above this */
   void *start, *end; /* Bounds of global page cache memory */
   /* Above requires no mutex.  Use mutex below for variable that follow. */
-  mutex_t *mutex;             /* Mutex for accessing the following: */
-  page_free_slot_t *freeSlot; /* Free page blocks */
-  int freeSlot;               /* Number of unused pcache slots */
+  mutex_t *mutex;         /* Mutex for accessing the following: */
+  page_free_slot_t *free; /* Free page blocks */
+  int freeSlotNum;        /* Number of unused pcache slots */
   /* The following value requires a mutex to change.  We skip the mutex on
   ** reading because (1) most platforms read a 32-bit integer atomically and
   ** (2) even if an incorrect value is read, no great harm is done since this
@@ -141,19 +149,19 @@ static cache_item_t *default_cache_fetch(cache_module_t *arg, page_id_t key,
 
 /* Static internal function forward declarations */
 
-static void calc_group_max_pinned_item_num(default_cache_group_t *);
+static void __calc_group_max_pinned_item_num(default_cache_group_t *);
+static inline __calc_cache_is_under_memory_pressure();
 static bool is_cache_under_memory_pressure(default_cache_t *cache);
 static bool is_cache_nearly_full(default_cache_t *cache);
 
 static void resize_hash(default_cache_t *);
 static default_cache_item_t *try_recycle_item(default_cache_t *cache);
-static void remove_from_hash(default_cache_item_t *, bool free_item);
-static default_cache_item_t *alloc_item(default_cache_t *, int benignMalloc);
-static void free_item(default_cache_item_t *);
-static default_cache_item_t *alloc_item(default_cache_t *);
+static void remove_from_hash(default_cache_item_t *, bool __free_cache_item);
+static default_cache_item_t *__alloc_cache_item(default_cache_t *, bool);
+static void __free_cache_item(default_cache_item_t *);
 static default_cache_item_t *init_item(default_cache_t *, page_id_t,
                                        default_cache_item_t *);
-static bool init_bulk(default_cache_t *);
+static bool __cache_init_bulk(default_cache_t *);
 
 static default_cache_item_t *pin_item(default_cache_item_t *);
 
@@ -163,16 +171,21 @@ static default_cache_item_t *fetch_no_mutex(default_cache_t *, page_id_t key,
 static default_cache_item_t *fetch_stage2(default_cache_t *cache, page_id_t key,
                                           cache_create_flag_t flags);
 
-static void *cache_alloc_buffer(int);
-static void cache_free_buffer(void *);
+static void *__cache_alloc_buffer(int);
+static void __cache_free_buffer(void *);
 static void cache_truncate_unsafe(default_cache_t *, page_id_t);
-static void cache_resize_hash(default_cache_t *cache);
+static void __cache_resize_hash(default_cache_t *cache);
 
 /* Static function implementations */
 
 static inline void
-calc_group_max_pinned_item_num(default_cache_group_t *group) {
+__calc_group_max_pinned_item_num(default_cache_group_t *group) {
   group->maxPinnedItem = group->maxItemNum + 10 - group->minItemNum;
+}
+
+static inline __calc_cache_is_under_memory_pressure() {
+  defaultCacheGlobal.underPressure =
+      defaultCacheGlobal.freeSlotNum < defaultCacheGlobal.reserved;
 }
 
 static bool is_cache_under_memory_pressure(default_cache_t *cache) {
@@ -190,120 +203,6 @@ static bool is_cache_nearly_full(default_cache_t *cache) {
            pinned_num >= cache->max90Percent) ||
           (is_cache_under_memory_pressure(cache) &&
            cache->recyclable < pinned_num));
-}
-
-/*
-** Malloc function used within this file to allocate space from the buffer
-** configured using sqlite3_config(SQLITE_CONFIG_PAGECACHE) option. If no
-** such buffer exists or there is no space left in it, this function falls
-** back to sqlite3Malloc().
-**
-** Multiple threads can run this routine at the same time.  Global variables
-** in pcache1 need to be protected via mutex.
-*/
-static void *cache_alloc_buffer(int) {}
-
-/*
-** Free an allocated buffer obtained from cache_alloc_buffer().
-*/
-static void cache_free_buffer(void *p) {}
-
-/*
-** Discard all pages from cache with a page number (key value)
-** greater than or equal to iLimit. Any pinned pages that meet this
-** criteria are unpinned before they are discarded.
-**
-** The default_cache_t mutex must be held when this function is called.
-*/
-static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
-  uint32_t h, stop;
-
-  assert(mutex_held(cache->group->mutex));
-  assert(cache->maxKey >= limit);
-  assert(cache->slotNum > 0);
-
-  if (cache->maxKey - limit < cache->slotNum) {
-    /* If we are just shaving the last few pages off the end of the
-     ** cache, then there is no point in scanning the entire hash table.
-     ** Only scan those hash slots that might contain pages that need to
-     ** be removed. */
-    h - limit % cache->slotNum;
-    stop = cache->maxKey - cache->slotNum;
-  } else {
-    /* This is the general case where many pages are being removed.
-     ** It is necessary to scan the entire hash table */
-    h = cache->slotNum / 2;
-    stop = h - 1;
-  }
-
-  while (true) {
-    default_cache_item_t **pp;
-    default_cache_item_t *item;
-    pp = &cache->hash[h];
-    /* free the item which key >= limit */
-    while ((item = *pp) != NULL) {
-      if (item->key >= limit) {
-        cache->itemNum -= 1;
-        pp = &item->next;
-        if (ITEM_IS_UNPINNED(item)) {
-          pin_item(item);
-        }
-        free_item(item);
-      } else {
-        pp = &item->next;
-      }
-    }
-    if (h == stop) {
-      break;
-    }
-    h = (h + 1) % cache->slotNum;
-  }
-}
-
-/*
-** This function is used to resize the hash table used by the cache passed
-** as the first argument.
-**
-** The default_cache_t mutex must be held when this function is called.
-*/
-static void cache_resize_hash(default_cache_t *cache) {
-  default_cache_item_t **newHash;
-  uint32_t newSlotNum;
-  uint32_t i;
-
-  assert(mutex_held(cache->group->mutex));
-
-  newSlotNum = cache->slotNum * 2;
-  if (newSlotNum < MIN_HASH_SLOT_NUM) {
-    newSlotNum = MIN_HASH_SLOT_NUM;
-  }
-
-  defaultCacheLeaveMutex(cache->group);
-  if (cache->hash != NULL) {
-    faultBeginBenignMalloc();
-  }
-
-  newHash = udb_calloc(sizeof(default_cache_item_t **) * newSlotNum);
-  if (newHash == NULL) {
-    return;
-  }
-
-  faultEndBenignMalloc();
-
-  defaultCacheEnterMutex(cache->group);
-  for (i = 0; i < cache->slotNum; i++) {
-    default_cache_item_t *item;
-    default_cache_item_t *nextItem = cache->hash[i];
-    while ((item = newItem) != NULL) {
-      uint32_t h = item->key % newSlotNum;
-      nextItem = item->next;
-      item->next = newHash[h];
-      newHash[h] = item;
-    }
-  }
-  udb_free(cache->hash);
-  cache->hash = newHash;
-  cache->slotNum = newSlotNum;
 }
 
 static default_cache_item_t *try_recycle_item(default_cache_t *cache) {
@@ -326,7 +225,7 @@ static default_cache_item_t *try_recycle_item(default_cache_t *cache) {
   pin_item(item);
   other = item->cache;
   if (other->itemSize != cache->itemSize) {
-    free_item(item);
+    __free_cache_item(item);
     item = NULL;
   } else {
     group->purgeableItem -= (other->purgeable - cache->purgeable);
@@ -356,37 +255,74 @@ static void remove_from_hash(default_cache_item_t *item, bool free_flag) {
 
   cache->itemNum -= 1;
   if (free_flag) {
-    free_item(item);
-  }
-}
-
-static default_cache_item_t *alloc_item(default_cache_t *, int benignMalloc) {}
-
-/*
-** Free a item allocated by alloc_item().
-*/
-static void free_item(default_cache_item_t *item) {
-  assert(item != NULL);
-  default_cache_t *cache = item->cache;
-  assert(mutex_held(cache->group->mutex));
-  if (item->isBulkLocal) {
-    item->next = cache->next;
-    cache->free = item;
-  } else {
-    cache_free_buffer(item->base.buf);
+    __free_cache_item(item);
   }
 }
 
 /*
 ** Allocate a new item object initially associated with cache.
 */
-static default_cache_item_t *alloc_item(default_cache_t *cache) {
+static default_cache_item_t *__alloc_cache_item(default_cache_t *cache,
+                                                bool benignMalloc) {
+  default_cache_item_t *item = NULL;
+  void *p;
+
+  assert(mutex_held(cache->group->mutex));
+
+  if (cache->free != NULL ||
+      (cache->slotNum == 0 && __cache_init_bulk(cache))) {
+    assert(cache->free != NULL);
+    item = cache->free;
+    cache->free = cache->free->next;
+    item->next = NULL;
+  } else {
+    if (benignMalloc) {
+      faultBeginBenignMalloc();
+    }
+    p = udb_alloc(cache->itemSize);
+    if (benignMalloc) {
+      faultEndBenignMalloc();
+    }
+    if (p == NULL) {
+      return NULL;
+    }
+    item = (default_cache_item_t *)&((unsigned char *)p)[cache->pageSize];
+    item->base.buf = p;
+    item->base.extra = &item[1];
+    item->isBulkLocal = false;
+    item->isAnchor = false;
+    item->lruPrev = NULL;
+  }
+
+  cache->group->purgeableItem += 1;
+  return item;
+}
+
+/*
+** Free a item allocated by __alloc_cache_item().
+*/
+static void __free_cache_item(default_cache_item_t *item) {
+  assert(item != NULL);
+  default_cache_t *cache = item->cache;
+  assert(mutex_held(cache->group->mutex));
+  if (item->isBulkLocal) {
+    item->next = cache->free;
+    cache->free = item;
+  } else {
+    __cache_free_buffer(item->base.buf);
+  }
+}
+
+/*
+** Allocate a new item object initially associated with cache.
+*/
+static default_cache_item_t *__alloc_cache_item(default_cache_t *cache) {
   default_cache_item_t *item;
   void *data;
 
   assert(mutex_held(cache->group->mutex));
 
-  if (cache->free || (cache->itemNum == 0 && init_bulk(cache))) {
+  if (cache->free || (cache->itemNum == 0 && __cache_init_bulk(cache))) {
     assert(cache->free != NULL);
     /* free the item from free list */
     item = cache->free;
@@ -430,11 +366,13 @@ static default_cache_item_t *init_item(default_cache_t *cache, page_id_t key,
 ** Try to initialize the cache->free and pCache->pBulk fields.
 ** Return true if cache->free ends up containing one or more free pages.
 */
-static bool init_bulk(default_cache_t *cache) {
-  int64_t bulk_size;
-  int bulk_num;
+static bool __cache_init_bulk(default_cache_t *cache) {
+  int64_t bulkSize;
+  int bulkNum;
   char *bulk;
   default_cache_item_t *item;
+
+  assert(defaultCacheGlobal.initItemNum >= 0);
 
   if (defaultCacheGlobal.initItemNum == 0) {
     return false;
@@ -445,24 +383,24 @@ static bool init_bulk(default_cache_t *cache) {
     return false;
   }
 
-  if (defaultCacheGlobal.initItemNum > 0) {
-    bulk_size = cache->itemSize * defaultCacheGlobal.initItemNum;
-  } else {
-    bulk_size = -1024 * defaultCacheGlobal.initItemNum;
-  }
-  if (bulk_size > cache->itemSize * cache->maxItemNum) {
-    bulk_size = cache->itemSize * cache->maxItemNum;
+  bulkSize = cache->itemSize * defaultCacheGlobal.initItemNum;
+
+  if (bulkSize > cache->itemSize * cache->maxItemNum) {
+    bulkSize = cache->itemSize * cache->maxItemNum;
   }
 
-  bulk = udb_alloc(bulk_size);
+  faultBeginBenignMalloc();
+  bulk = udb_alloc(bulkSize);
+  faultEndBenignMalloc();
   if (bulk == NULL) {
     return false;
   }
 
   /* init the bulk cache items */
-  bulk_num = bulk_size / cache->itemSize;
+  bulkNum = bulkSize / cache->itemSize;
   do {
     item = (default_cache_item_t *)&bulk[cache->pageSize];
+    item->base.buf = bulk;
     item->base.extraSize = &item[1];
     item->isAnchor = false;
     item->isBulkLocal = true;
@@ -470,7 +408,7 @@ static bool init_bulk(default_cache_t *cache) {
     item->lruPrev = NULL;
     cache->free = item;
     bulk += cache->itemSize;
-  } while (--bulk_num);
+  } while (--bulkNum);
 
   return cache->free != NULL;
 }
@@ -519,7 +457,7 @@ static default_cache_item_t *fetch_stage2(default_cache_t *cache, page_id_t key,
   }
 
   if (cache->itemNum >= cache->slotNum) {
-    cache_resize_hash(cache);
+    __cache_resize_hash(cache);
   }
   assert(cache->slotNum > 0 && cache->hash != NULL);
 
@@ -531,7 +469,7 @@ static default_cache_item_t *fetch_stage2(default_cache_t *cache, page_id_t key,
   ** attempt to allocate a new one.
   */
   if (item == NULL) {
-    item = alloc_item(cache);
+    item = __alloc_cache_item(cache);
   }
 
   if (item == NULL) {
@@ -539,6 +477,161 @@ static default_cache_item_t *fetch_stage2(default_cache_t *cache, page_id_t key,
   }
 
   return init_item(cache, key, item);
+}
+
+/*
+** Malloc function used within this file to allocate space from the buffer
+** configured using sqlite3_config(SQLITE_CONFIG_PAGECACHE) option. If no
+** such buffer exists or there is no space left in it, this function falls
+** back to sqlite3Malloc().
+**
+** Multiple threads can run this routine at the same time.  Global variables
+** in pcache1 need to be protected via mutex.
+*/
+static void *__cache_alloc_buffer(int byte) {
+  void *p = NULL;
+
+  assert(mutex_not_held(defaultCacheGlobal.group.mutex));
+  if (byte <= defaultCacheGlobal.slotSize) {
+    mutex_enter(defaultCacheGlobal.mutex);
+    p = (default_cache_item_t *)defaultCacheGlobal.free;
+    if (p != NULL) {
+      defaultCacheGlobal.free = defaultCacheGlobal.free->next;
+      defaultCacheGlobal.freeSlotNum -= 1;
+      __calc_cache_is_under_memory_pressure();
+      assert(defaultCacheGlobal.slotNum >= 0);
+    }
+    mutex_leave(defaultCacheGlobal.mutex);
+  }
+  if (p == NULL) {
+    p = udb_alloc(byte);
+  }
+
+  return p;
+}
+
+/*
+** Free an allocated buffer obtained from __cache_alloc_buffer().
+*/
+static void __cache_free_buffer(void *p) {
+  if (p == NULL) {
+    return;
+  }
+  if (PTR_WITHIN(p, defaultCacheGlobal.start, defaultCacheGlobal.end)) {
+    page_free_slot_t *slot;
+    mutex_enter(defaultCacheGlobal.mutex);
+    slot = (page_free_slot_t *)p;
+    slot->next = defaultCacheGlobal.free;
+    defaultCacheGlobal.free = slot;
+    defaultCacheGlobal.free += 1;
+    __calc_cache_is_under_memory_pressure();
+    assert(defaultCacheGlobal.free <= defaultCacheGlobal.slotNum);
+    mutex_leave(defaultCacheGlobal.mutex);
+  } else {
+    udb_free(p);
+  }
+}
+
+/*
+** Discard all pages from cache with a page number (key value)
+** greater than or equal to iLimit. Any pinned pages that meet this
+** criteria are unpinned before they are discarded.
+**
+** The default_cache_t mutex must be held when this function is called.
+*/
+static void cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
+  uint32_t h, stop;
+
+  assert(mutex_held(cache->group->mutex));
+  assert(cache->maxKey >= limit);
+  assert(cache->slotNum > 0);
+
+  if (cache->maxKey - limit < cache->slotNum) {
+    /* If we are just shaving the last few pages off the end of the
+     ** cache, then there is no point in scanning the entire hash table.
+     ** Only scan those hash slots that might contain pages that need to
+     ** be removed. */
+    h - limit % cache->slotNum;
+    stop = cache->maxKey - cache->slotNum;
+  } else {
+    /* This is the general case where many pages are being removed.
+     ** It is necessary to scan the entire hash table */
+    h = cache->slotNum / 2;
+    stop = h - 1;
+  }
+
+  while (true) {
+    default_cache_item_t **pp;
+    default_cache_item_t *item;
+    pp = &cache->hash[h];
+    /* free the item which key >= limit */
+    while ((item = *pp) != NULL) {
+      if (item->key >= limit) {
+        cache->itemNum -= 1;
+        pp = &item->next;
+        if (ITEM_IS_UNPINNED(item)) {
+          pin_item(item);
+        }
+        __free_cache_item(item);
+      } else {
+        pp = &item->next;
+      }
+    }
+    if (h == stop) {
+      break;
+    }
+    h = (h + 1) % cache->slotNum;
+  }
+}
+
+/*
+** This function is used to resize the hash table used by the cache passed
+** as the first argument.
+**
+** The default_cache_t mutex must be held when this function is called.
+*/
+static void __cache_resize_hash(default_cache_t *cache) {
+  default_cache_item_t **newHash;
+  uint32_t newSlotNum;
+  uint32_t i;
+
+  assert(mutex_held(cache->group->mutex));
+
+  newSlotNum = cache->slotNum * 2;
+  if (newSlotNum < MIN_HASH_SLOT_NUM) {
+    newSlotNum = MIN_HASH_SLOT_NUM;
+  }
+
+  defaultCacheLeaveMutex(cache->group);
+  if (cache->hash != NULL) {
+    faultBeginBenignMalloc();
+  }
+
+  newHash = udb_calloc(sizeof(default_cache_item_t **) * newSlotNum);
+  if (cache->hash != NULL) {
+    faultEndBenignMalloc();
+  }
+
+  defaultCacheEnterMutex(cache->group);
+
+  if (newHash == NULL) {
+    return;
+  }
+
+  /* Move items from old hash table to the new hash table */
+  for (i = 0; i < cache->slotNum; i++) {
+    default_cache_item_t *item;
+    default_cache_item_t *nextItem = cache->hash[i];
+    while ((item = nextItem) != NULL) {
+      uint32_t h = item->key % newSlotNum;
+      nextItem = item->next;
+      item->next = newHash[h];
+      newHash[h] = item;
+    }
+  }
+  udb_free(cache->hash);
+  cache->hash = newHash;
+  cache->slotNum = newSlotNum;
 }
 
 /*
@@ -666,11 +759,11 @@ cache_module_t *default_cache_create(cache_module_config_t *config) {
   cache->extraSize = config->extraSize;
   cache->itemSize = config->pageSize + config->extraSize +
                     ROUND8(sizeof(default_cache_item_t));
-  cache_resize_hash(cache);
+  __cache_resize_hash(cache);
 
   cache->minItemNum = 10;
   grp->minItemNum += cache->minItemNum;
-  calc_group_max_pinned_item_num(grp);
+  __calc_group_max_pinned_item_num(grp);
 
   defaultCacheLeaveMutex(grp);
 
@@ -697,7 +790,7 @@ void default_cache_destroy(cache_module_t *p) {
   grp->maxItemNum -= cache->maxItemNum;
   assert(grp->minItemNum >= cache->minItemNum);
   grp->minItemNum -= cache->minItemNum;
-  calc_group_max_pinned_item_num(grp);
+  __calc_group_max_pinned_item_num(grp);
   defaultCacheLeaveMutex(grp);
   udb_free(cache->bulk);
   udb_free(cache->hash);
