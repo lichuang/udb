@@ -14,7 +14,7 @@ typedef struct default_cache_item_t default_cache_item_t;
 typedef struct page_free_slot_t page_free_slot_t;
 
 struct default_cache_item_t {
-  cache_item_t base;      /* Base class, Must be first. */
+  cache_item_base_t base; /* Base class, Must be first. */
   page_id_t key;          /* Key value (page id) */
   default_cache_t *cache; /* Cache that currently owns this item */
   bool isAnchor;          /* This is the default_cache_group_t.lru element */
@@ -140,13 +140,22 @@ static const uint32_t MIN_HASH_SLOT_NUM = 256;
 #define DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX 1
 #endif
 
+/*
+** A cache item is pinned if it is not on the LRU list.  To be "pinned" means
+** that the item is in active use and must not be deallocated.
+*/
+#define ITEM_IS_PINNED(p) ((p)->lruNext == NULL)
+#define ITEM_IS_UNPINNED(p) ((p)->lruNext != NULL)
+
 /* The default cache method forward declarations */
 udb_err_t default_cache_init(void *);
 void default_cache_shutdown(void *);
-cache_module_t *default_cache_create(cache_module_config_t *);
-static cache_item_t *default_cache_fetch(cache_module_t *arg, page_id_t key,
-                                         cache_create_flag_t flag);
-void default_cache_unpin(cache_module_t *, cache_item_t *, bool);
+cache_module_t *default_cache_create(int, int);
+void default_cache_cache_size(cache_module_t *, int cachesize);
+static cache_item_base_t *default_cache_fetch(cache_module_t *arg,
+                                              page_id_t key,
+                                              cache_create_flag_t flag);
+void default_cache_unpin(cache_module_t *, cache_item_base_t *, bool);
 void default_cache_destroy(cache_module_t *);
 
 /* Static internal function forward declarations */
@@ -808,15 +817,14 @@ void default_cache_shutdown(void *notUsed) {
 ** Implementation of the default_cache_methods.Create method.
 ** Allocate a new cache.
 */
-cache_module_t *default_cache_create(cache_module_config_t *config) {
+cache_module_t *default_cache_create(int pageSize, int extraSize) {
   default_cache_t *cache;     /* The newly created page cache */
   default_cache_group_t *grp; /* The group the new page cache will belong to */
   int sz; /* Bytes of memory required to allocate the new cache */
   bool separateCache = defaultCacheGlobal.separateCache;
 
-  assert(config != NULL);
-  assert(VALID_PAGE_SIZE(config->pageSize));
-  assert(config->extraSize < 300);
+  assert(VALID_PAGE_SIZE(pageSize));
+  assert(extraSize < 300);
 
   sz = sizeof(default_cache_t) + sizeof(default_cache_group_t) * separateCache;
 
@@ -836,10 +844,9 @@ cache_module_t *default_cache_create(cache_module_config_t *config) {
     grp->lru.lruPrev = grp->lru.lruNext = &grp->lru;
   }
   cache->group = grp;
-  cache->pageSize = config->pageSize;
-  cache->extraSize = config->extraSize;
-  cache->itemSize = config->pageSize + config->extraSize +
-                    ROUND8(sizeof(default_cache_item_t));
+  cache->pageSize = pageSize;
+  cache->extraSize = extraSize;
+  cache->itemSize = pageSize + extraSize + ROUND8(sizeof(default_cache_item_t));
   __cache_resize_hash(cache);
 
   cache->minItemNum = 10;
@@ -858,22 +865,41 @@ cache_module_t *default_cache_create(cache_module_config_t *config) {
 /*
 ** Implementation of the default_cache_methods.Fetch method.
 */
-static cache_item_t *default_cache_fetch(cache_module_t *module, page_id_t key,
-                                         cache_create_flag_t flag) {
+void default_cache_cache_size(cache_module_t *module, int maxItemNum) {
+  default_cache_t *cache = (default_cache_t *)module;
+  default_cache_group_t *grp = cache->group;
+
+  defaultCacheEnterMutex(grp);
+
+  grp->maxItemNum += maxItemNum - cache->maxItemNum;
+  __calc_group_max_pinned_item_num(grp);
+  cache->maxItemNum = maxItemNum;
+  cache->max90Percent = cache->maxItemNum * 9 / 10;
+  __cache_enforce_max_item(cache);
+
+  defaultCacheLeaveMutex(grp);
+}
+
+/*
+** Implementation of the default_cache_methods.Fetch method.
+*/
+static cache_item_base_t *default_cache_fetch(cache_module_t *module,
+                                              page_id_t key,
+                                              cache_create_flag_t flag) {
   default_cache_t *cache = (default_cache_t *)module;
   assert(cache->slotNum > 0);
 
 #if DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX
   if (cache->group->mutex != NULL) {
-    return (cache_item_t *)__fetch_item_with_mutex(cache, key, flag);
+    return (cache_item_base_t *)__fetch_item_with_mutex(cache, key, flag);
   } else
 #endif
   {
-    return (cache_item_t *)__fetch_item_no_mutex(cache, key, flag);
+    return (cache_item_base_t *)__fetch_item_no_mutex(cache, key, flag);
   }
 }
 
-void default_cache_unpin(cache_module_t *module, cache_item_t *p,
+void default_cache_unpin(cache_module_t *module, cache_item_base_t *p,
                          bool reuseUnlikely) {
   default_cache_t *cache = (default_cache_t *)module;
   default_cache_group_t *grp = cache->group;
@@ -926,22 +952,17 @@ void default_cache_destroy(cache_module_t *p) {
   udb_free(cache);
 }
 
-struct cache_methods_t default_cache_methods = {
-    1,                      /* version */
-    NULL,                   /* arg */
-    default_cache_init,     /* Init */
-    default_cache_shutdown, /* Shutdown */
-    default_cache_fetch,    /* Fetch */
-};
-
 void cache_use_default_methods() {
   static const cache_methods_t default_cache_methods = {
-      1,                      /* version */
-      NULL,                   /* arg */
-      default_cache_init,     /* Init */
-      default_cache_shutdown, /* Shutdown */
-      default_cache_fetch,    /* Fetch */
-      default_cache_unpin,    /* Unpin */
+      1,                        /* version */
+      NULL,                     /* arg */
+      default_cache_init,       /* Init */
+      default_cache_shutdown,   /* Shutdown */
+      default_cache_create,     /* Create */
+      default_cache_cache_size, /* CacheSize */
+      default_cache_fetch,      /* Fetch */
+      default_cache_unpin,      /* Unpin */
+      default_cache_destroy,    /* Destroy */
   };
 
   udb_config(UDB_CONFIG_CACHE_METHOD, &default_cache_methods);

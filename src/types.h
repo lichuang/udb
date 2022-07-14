@@ -20,8 +20,8 @@ typedef struct page_t page_t;
 
 typedef struct page_cache_t page_cache_t;
 typedef void *cache_module_t;
-typedef struct cache_module_config_t cache_module_config_t;
-typedef struct cache_item_t cache_item_t;
+typedef struct cache_config_t cache_config_t;
+typedef struct cache_item_base_t cache_item_base_t;
 typedef struct cache_methods_t cache_methods_t;
 
 typedef struct node_t node_t;

@@ -7,27 +7,34 @@
 
 #include "types.h"
 
+/*
+** Every page in the cache is controlled by an instance of the following
+** structure.
+*/
+struct page_t {
+  cache_item_base_t *base;
+  void *data;          /* Page data */
+  void *extra;         /* Extra content */
+  page_cache_t *cache; /* PRIVATE: Cache that owns this page */
+  page_t *dirty;       /* Transient list of dirty sorted by pgno */
+  pager_t *pager;      /* The pager this page is part of */
+  page_id_t id;        /* Page number for this page */
+  uint16_t flags;      /* PAGE_FLAG flags defined below */
+
+  /**********************************************************************
+  ** Elements above, except cache, are public.  All that follow are
+  ** private to pcache.c and should not be accessed by other modules.
+  ** cache is grouped with the public elements for efficiency.
+  */
+  uint16_t ref;       /* Number of reference count of this page */
+  page_t *dirty_next; /* Next element in list of dirty pages */
+  page_t *dirty_prev; /* Prev element in list of dirty pages */
+};
+
 /* Page flag bits */
 #define PAGE_FLAG_CLEAN 0x001      /* Page not on the PCache.pDirty list */
 #define PAGE_FLAG_DIRTY 0x002      /* Page is on the PCache.pDirty list */
 #define PAGE_FLAG_DONT_WRITE 0x010 /* Do not write content to disk */
-
-/* page_t represents the page read from the database file */
-struct page_t {
-  page_id_t id;
-
-  pager_t *pager;
-
-  page_cache_t *cache; /* Cache that owns this page */
-  uint16_t flags;
-
-  uint16_t ref; /* Number of reference count of this page */
-
-  void *data; /* The page data read from file */
-
-  page_t *dirty_next; /* Next element in list of dirty pages */
-  page_t *dirty_prev; /* Prev element in list of dirty pages */
-};
 
 udb_err_t page_set_writable(page_t *);
 

@@ -3,16 +3,27 @@
 
 #include <udb.h>
 
+#include "page.h"
 #include "types.h"
 
-struct cache_item_t {
+/*
+** The cache_item_base_t object represents a single page in the
+** page cache.  The page cache will allocate instances of this
+** object.  Various methods of the page cache use pointers to instances
+** of this object as parameters or as their return value.
+**
+** See [cache_methods_t] for additional information.
+*/
+struct cache_item_base_t {
   void *buf;   /* The content of the page */
   void *extra; /* Extra information associated with the page */
 };
 
-struct cache_module_config_t {
-  unsigned int pageSize;
-  unsigned int extraSize;
+struct cache_config_t {
+  int pageSize;
+  int extraSize;
+  int (*Stress)(void *, page_t *); /* Call to try make a page clean */
+  void *stressArg;                 /* Argument to Stress */
 };
 
 /*
@@ -34,24 +45,19 @@ struct cache_methods_t {
   udb_err_t (*Init)(void *);
   void (*Shutdown)(void *);
 
-  cache_module_t *(*Create)(cache_module_config_t *);
-  cache_item_t *(*Fetch)(cache_module_t *, page_id_t key,
-                         cache_create_flag_t flag);
-  void (*Unpin)(cache_module_t *, cache_item_t *, bool);
+  cache_module_t *(*Create)(int, int);
+  void (*CacheSize)(cache_module_t *, int nCacheSize);
+  cache_item_base_t *(*Fetch)(cache_module_t *, page_id_t key,
+                              cache_create_flag_t flag);
+  void (*Unpin)(cache_module_t *, cache_item_base_t *, bool);
   void (*Destroy)(cache_module_t *);
 };
 
-extern cache_methods_t default_cache_methods;
-
-/*
-** A page is pinned if it is not on the LRU list.  To be "pinned" means
-** that the page is in active use and must not be deallocated.
-*/
-#define ITEM_IS_PINNED(p) ((p)->lruNext == NULL)
-#define ITEM_IS_UNPINNED(p) ((p)->lruNext != NULL)
-
-udb_err_t cache_open(page_cache_t **);
+udb_err_t cache_open(cache_config_t *, page_cache_t *);
 void cache_close(page_cache_t *);
+
+/* Modify the page-size after the cache has been created. */
+udb_err_t cache_set_page_size(page_cache_t *, int);
 
 page_t *cache_fetch(page_cache_t *, page_id_t, cache_create_flag_t);
 udb_err_t cache_fetch_stress(page_cache_t *, page_id_t, page_t **);
