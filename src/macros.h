@@ -1,6 +1,8 @@
 #ifndef _UDB_MACROS_H_
 #define _UDB_MACROS_H_
 
+#include <stddef.h>
+
 #define UNUSED_PARAMETER(x) (void)(x)
 
 /*
@@ -24,5 +26,13 @@
 */
 #define PTR_WITHIN(P, S, E)                                                    \
   (((uintptr_t)(P) >= (uintptr_t)(S)) && ((uintptr_t)(P) < (uintptr_t)(E)))
+
+/*
+** GCC does not define the offsetof() macro so we'll have to do it
+** ourselves.
+*/
+#ifndef offsetof
+#define offsetof(STRUCTURE, FIELD) ((int)((char *)&((STRUCTURE *)0)->FIELD))
+#endif
 
 #endif /* _UDB_MACROS_H_ */

@@ -152,6 +152,7 @@ udb_err_t default_cache_init(void *);
 void default_cache_shutdown(void *);
 cache_module_t *default_cache_create(int, int);
 void default_cache_cache_size(cache_module_t *, int cachesize);
+int default_cache_page_size(cache_module_t *);
 static cache_item_base_t *default_cache_fetch(cache_module_t *arg,
                                               page_id_t key,
                                               cache_create_flag_t flag);
@@ -878,6 +879,20 @@ void default_cache_cache_size(cache_module_t *module, int maxItemNum) {
   __cache_enforce_max_item(cache);
 
   defaultCacheLeaveMutex(grp);
+}
+
+/*
+** Implementation of the default_cache_methods.PageCount method.
+*/
+int default_cache_page_size(cache_module_t *module) {
+  default_cache_t *cache = (default_cache_t *)module;
+
+  defaultCacheEnterMutex(cache->group);
+  int n = cache->itemNum;
+
+  defaultCacheLeaveMutex(cache->group);
+
+  return n;
 }
 
 /*
