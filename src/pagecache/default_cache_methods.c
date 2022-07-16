@@ -967,6 +967,23 @@ void default_cache_destroy(cache_module_t *p) {
   udb_free(cache);
 }
 
+int cache_setup_buffer(int pageSize, int pageNum) {
+  assert(VALID_PAGE_SIZE(pageSize));
+  assert(pageNum > 0);
+
+  void *buffer = udb_calloc(pageSize * pageNum);
+  if (buffer == NULL) {
+    return UDB_OOM;
+  }
+
+  if (!defaultCacheGlobal.inited) {
+    return UDB_OK;
+  }
+
+  // TODO
+  return UDB_OK;
+}
+
 void cache_use_default_methods() {
   static const cache_methods_t default_cache_methods = {
       1,                        /* version */

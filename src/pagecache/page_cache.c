@@ -50,13 +50,17 @@ typedef enum MANAGE_DIRTY_LIST_FLAG {
   MANAGE_DIRTY_LIST_FLAG_REMOVE = 1,
   MANAGE_DIRTY_LIST_FLAG_ADD = 2,
   MANAGE_DIRTY_LIST_FLAG_FRONT = 3,
-} ADD_DIRTY_LIST_FLAG;
+} MANAGE_DIRTY_LIST_FLAG;
 
 /* Static internal function forward declarations */
 static page_t *__fetch_finish_with_init(page_cache_t *, page_id_t,
                                         cache_item_base_t *);
 static void __unpin_page(page_t *);
-static void __manage_dirty_list(page_t *, ADD_DIRTY_LIST_FLAG);
+static void __manage_dirty_list(page_t *, MANAGE_DIRTY_LIST_FLAG);
+
+#ifdef UDB_DEBUG
+static bool __page_sanity(page_t *);
+#endif
 
 /* Static internal function implementations */
 
@@ -82,7 +86,94 @@ static page_t *__fetch_finish_with_init(page_cache_t *cache, page_id_t id,
 
   return cache_fetch_finish(page, id, base);
 }
+
+/*
+** Wrapper around the pluggable caches Unpin method.
+*/
+static void __unpin_page(page_t *page) {
+  udbGlobalConfig.cacheMethods->Unpin(page->cache, page, false);
+}
+
+/*
+** Manage page's participation on the dirty list.  Bits of the addRemove
+** argument determines what operation to do.  The 0x01 bit means first
+** remove page from the dirty list.  The 0x02 means add page back to
+** the dirty list.  Doing both moves page to the front of the dirty list.
+*/
+static void __manage_dirty_list(page_t *page, MANAGE_DIRTY_LIST_FLAG flags) {
+  page_cache_t *cache = page->cache;
+
+  if (flags & MANAGE_DIRTY_LIST_FLAG_REMOVE) {
+    assert(page->dirtyNext || page == cache->dirtyTail);
+    assert(page->dirtyPrev || page == cache->dirty);
+
+    /* Update the page_cache_t.synced variable if necessary. */
+    if (page->dirtyNext) {
+      page->dirtyNext->dirtyPrev = page->dirtyPrev;
+    } else {
+      assert(page == cache->dirtyTail);
+      cache->dirtyTail = page->dirtyPrev;
+    }
+
+    if (page->dirtyPrev) {
+      page->dirtyPrev->dirtyNext = page->dirtyNext;
+    } else {
+      /* If there are now no dirty pages in the cache, set createFlag to
+       ** CACHE_CREATE_FLAG_HARD_ALLOCATE.
+       ** This is an optimization that allows cache_fetch() to skip
+       ** searching for a dirty page to eject from the cache when it might
+       ** otherwise have to.  */
+      asssert(page == cache->dirty);
+      cache->dirty = page->dirtyNext;
+      if (cache->dirty == NULL) {
+        cache->createFlag = CACHE_CREATE_FLAG_HARD_ALLOCATE;
+      }
+    }
+  }
+
+  if (flags & MANAGE_DIRTY_LIST_FLAG_ADD) {
+    page->dirtyPrev = NULL;
+    page->dirtyNext = cache->dirty;
+    if (page->dirtyNext) {
+      assert(page->dirtyNext->dirtyPrev == NULL);
+      page->dirtyNext->dirtyPrev = page;
+    } else {
+      cache->dirtyTail = page;
+      assert(cache->createFlag == CACHE_CREATE_FLAG_HARD_ALLOCATE);
+      cache->createFlag = CACHE_CREATE_FLAG_EASY_ALLOCATE;
+    }
+  }
+  cache->dirty = page;
+
+  /* If synced is NULL, set
+   ** pSynced to point to it. */
+  if (cache->synced == NULL) {
+    cache->synced = page;
+  }
+}
+
+#ifdef UDB_DEBUG
+static bool __page_sanity(page_t *page) {}
+#endif
+
 /* Outer function implementations */
+
+extern void cache_use_default_methods();
+
+udb_err_t cache_init() {
+  if (udbGlobalConfig.cacheMethods->Init == NULL) {
+    cache_use_default_methods();
+    assert(udbGlobalConfig.cacheMethods->Init != NULL);
+  }
+
+  return udbGlobalConfig.cacheMethods->Init(udbGlobalConfig.cacheMethods->arg);
+}
+
+void cache_shutdown() {
+  if (udbGlobalConfig.cacheMethods->Shutdown == NULL) {
+    udbGlobalConfig.cacheMethods->Shutdown(udbGlobalConfig.cacheMethods->arg);
+  }
+}
 
 /*
 ** Create a new page_cache_t object. Storage space to hold the object
@@ -235,6 +326,9 @@ page_t *cache_fetch_finish(page_cache_t *cache, page_id_t id,
   cache->refSum++;
   page->refNum++;
 
+#ifdef UDB_DEBUG
+  assert(__page_sanity(page));
+#endif
   return page;
 }
 
@@ -251,6 +345,83 @@ void cache_release_page(page_t *page) {
     } else {
       __manage_dirty_list(page, MANAGE_DIRTY_LIST_FLAG_FRONT);
     }
+  }
+}
+
+/*
+** Drop a page from the cache. There must be exactly one reference to the
+** page. This function deletes that reference, so after it returns the
+** page pointed to by p is invalid.
+*/
+void cache_drop(page_t *page) {
+  assert(page->refNum == 1);
+#ifdef UDB_DEBUG
+  assert(__page_sanity(page));
+#endif
+
+  if (page->flags & PAGE_FLAG_DIRTY) {
+    __manage_dirty_list(page, MANAGE_DIRTY_LIST_FLAG_REMOVE);
+  }
+  page->cache->refSum--;
+  udbGlobalConfig.cacheMethods->Unpin(page->cache->cacheModule, page->base,
+                                      true);
+}
+
+/*
+** Make sure the page is marked as dirty. If it isn't dirty already,
+** make it so.
+*/
+void cache_mark_dirty(page_t *page) {
+  assert(page->refNum > 0);
+#ifdef UDB_DEBUG
+  assert(__page_sanity(page));
+#endif
+
+  if (!(page->flags & (PAGE_FLAG_CLEAN | PAGE_FLAG_DONT_WRITE))) {
+    return;
+  }
+  page->flags &= ~PAGE_FLAG_DONT_WRITE;
+  if (page->flags & PAGE_FLAG_CLEAN) {
+    page->flags ^= (PAGE_FLAG_DIRTY | PAGE_FLAG_CLEAN);
+    assert((page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_CLEAN)) ==
+           PAGE_FLAG_DIRTY);
+    __manage_dirty_list(page, MANAGE_DIRTY_LIST_FLAG_ADD);
+  }
+#ifdef UDB_DEBUG
+  assert(__page_sanity(page));
+#endif
+}
+
+/*
+** Make sure the page is marked as clean. If it isn't clean already,
+** make it so.
+*/
+void cache_mark_clean(page_t *page) {
+#ifdef UDB_DEBUG
+  assert(__page_sanity(page));
+#endif
+
+  assert((page->flags & PAGE_FLAG_DIRTY) != 0);
+  assert((page->flags & PAGE_FLAG_CLEAN) == 0);
+
+  __manage_dirty_list(page, MANAGE_DIRTY_LIST_FLAG_REMOVE);
+  page->flags &= ~(PAGE_FLAG_DIRTY);
+  page->flags |= (PAGE_FLAG_CLEAN);
+#ifdef UDB_DEBUG
+  assert(__page_sanity(page));
+#endif
+  if (page->refNum == 0) {
+    __unpin_page(page);
+  }
+}
+
+/*
+** Make every page in the cache clean.
+*/
+void cache_clean_all(page_cache_t *cache) {
+  pager_t *page;
+  while ((page = cache->dirty) != NULL) {
+    cache_mark_clean(page);
   }
 }
 

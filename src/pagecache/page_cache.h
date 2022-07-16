@@ -58,6 +58,16 @@ struct cache_methods_t {
   void (*Destroy)(cache_module_t *);
 };
 
+/* Initialize and shutdown the page cache subsystem */
+udb_err_t cache_init();
+void cache_shutdown();
+
+/*
+** pre-allocate memory for cache buffer with
+** udb_config_t.preAllocatePageCacheNum.
+*/
+udb_err_t cache_setup_buffer(int, int);
+
 /* Create a new pager cache.
 ** Under memory stress, invoke Stress to try to make pages clean.
 ** Only clean and unpinned pages can be reclaimed.
@@ -75,7 +85,10 @@ udb_err_t cache_fetch_stress(page_cache_t *, page_id_t, page_t **);
 page_t *cache_fetch_finish(page_cache_t *, page_id_t, cache_item_base_t *);
 void cache_release_page(page_t *);
 
-void cache_drop(page_cache_t *, page_t *);
+void cache_drop(page_t *);
+void cache_mark_dirty(page_t *);
+void cache_mark_clean(page_t *);
+void cache_clean_all(page_cache_t *);
 
 /* Return the total number of pages stored in the cache */
 int cache_page_count(page_cache_t *);

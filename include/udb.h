@@ -3,7 +3,8 @@
 
 typedef struct udb_config_t {
   const char *db_path;
-  unsigned int pageSize;
+  int pageSize;                /* page size */
+  int preAllocatePageCacheNum; /* pre-allocate number of page cache */
 } udb_config_t;
 
 typedef struct udb_t {
