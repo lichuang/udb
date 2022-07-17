@@ -26,9 +26,11 @@ typedef struct cache_methods_t cache_methods_t;
 
 typedef struct node_t node_t;
 
-typedef struct file_t file_t;
-
 typedef uint32_t wal_frame_t;
 typedef struct wal_t wal_t;
+typedef struct wal_config_t wal_config_t;
+
+typedef struct file_t file_t;
+typedef struct os_t os_t;
 
 #endif /* _UDB_TYPES_H_ */
