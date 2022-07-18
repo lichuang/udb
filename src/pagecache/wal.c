@@ -1,44 +1,23 @@
+#include <assert.h>
 #include <stdio.h>
 
 #include "memory/alloc.h"
 #include "os/os.h"
 #include "wal.h"
 
-/*
-** An open write-ahead log file is represented by an instance of the
-** following object.
-*/
-struct wal_t {
-  os_t *os;        /* The os object used to create dbFile */
-  file_t *dbFile;  /* File handle for the database file */
-  file_t *walFile; /* File handle for WAL file */
-};
+extern udb_err_t wal_open_version1(wal_config_t *, wal_t **);
 
-/* Static internal function forward declarations */
-
-/* Static internal function implementations */
-
-/* Outer function implementations */
 udb_err_t wal_open(wal_config_t *config, wal_t **wal) {
-  udb_err_t ret = UDB_OK;
-  wal_t *retWal = NULL;
-  os_t *os = config->os; /* os module to open wal and wal-index */
-  file_t *dbFile;        /* The open database file */
-  const char *walName = config->walName; /* Name of the WAL file */
+  assert(config->version == 1);
 
-  assert(walName != NULL && walName[0] != '\0');
-  assert(config->dbFile != NULL);
+  return wal_open_version1(config, wal);
+}
 
-  *wal = NULL;
+udb_err_t wal_close(wal_t *wal) {
+  wal->methods.Destroy(wal->impl);
+  udb_free(wal);
+}
 
-  retWal = (wal_t *)udb_calloc(sizeof(wal_t) + os->sizeOfFile);
-  if (retWal == NULL) {
-    return UDB_OOM;
-  }
-
-  retWal->os = os;
-  retWal->walFile = (file_t *)&retWal[1];
-  retWal->dbFile = config->dbFile;
-
-  return ret;
+udb_err_t wal_find_frame(wal_t *wal, page_id_t id, wal_frame_t *frame) {
+  wal->methods.FindFrame(wal->impl, id, frame);
 }

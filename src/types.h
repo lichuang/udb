@@ -29,6 +29,8 @@ typedef struct node_t node_t;
 typedef uint32_t wal_frame_t;
 typedef struct wal_t wal_t;
 typedef struct wal_config_t wal_config_t;
+typedef struct wal_methods_t wal_methods_t;
+typedef void *wal_impl_t;
 
 typedef struct file_t file_t;
 typedef struct os_t os_t;
