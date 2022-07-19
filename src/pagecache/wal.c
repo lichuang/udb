@@ -5,12 +5,12 @@
 #include "os/os.h"
 #include "wal.h"
 
-extern udb_err_t wal_open_version1(wal_config_t *, wal_t **);
+extern udb_err_t wal_open_impl_v1(wal_config_t *, wal_t **);
 
 udb_err_t wal_open(wal_config_t *config, wal_t **wal) {
   assert(config->version == 1);
 
-  return wal_open_version1(config, wal);
+  return wal_open_impl_v1(config, wal);
 }
 
 udb_err_t wal_close(wal_t *wal) {

@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include "memory/alloc.h"
+#include "os/file.h"
 #include "os/os.h"
 #include "wal.h"
 
@@ -9,9 +10,10 @@
 ** following object.
 */
 typedef struct wal_impl_v1_t {
-  os_t *os;        /* The os object used to create dbFile */
-  file_t *dbFile;  /* File handle for the database file */
-  file_t *walFile; /* File handle for WAL file */
+  os_t *os;            /* The os object used to create dbFile */
+  file_t *dbFile;      /* File handle for the database file */
+  file_t *walFile;     /* File handle for WAL file */
+  uint64_t maxWalSize; /* Truncate WAL to this size upon reset */
 } wal_impl_v1_t;
 
 /* Static wal impl methods function forward declarations */
@@ -19,7 +21,7 @@ udb_err_t __FindFrame_v1(wal_impl_t *, page_id_t, wal_frame_t *);
 void __Destroy_v1(wal_impl_t *);
 
 /* Static internal function forward declarations */
-static void __init_wal_v1(wal_t *, wal_impl_v1_t *);
+static void __init_wal_impl_v1(wal_t *, wal_impl_v1_t *);
 
 /* Static wal impl methods function forward declarations */
 udb_err_t __FindFrame_v1(wal_impl_t *impl, page_id_t id, wal_frame_t *frame) {}
@@ -46,9 +48,10 @@ void __Destroy_v1(wal_impl_t *impl) {}
 ** *wal is set to point to a new WAL handle. If an error occurs,
 ** an UDB error code is returned and *wal is left unmodified.
 */
-udb_err_t wal_open_version1(wal_config_t *config, wal_t **wal) {
+udb_err_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
   udb_err_t ret = UDB_OK;
   wal_t *retWal = NULL;
+  int flags;             /* Flags passed to OsOpen() */
   os_t *os = config->os; /* os module to open wal and wal-index */
   file_t *dbFile;        /* The open database file */
   const char *walName = config->walName; /* Name of the WAL file */
@@ -68,16 +71,25 @@ udb_err_t wal_open_version1(wal_config_t *config, wal_t **wal) {
 
   impl = (wal_impl_v1_t *)&retWal[1];
   impl->walFile = (file_t *)&impl[1];
-  __init_wal_v1(retWal, impl);
+  __init_wal_impl_v1(retWal, impl);
 
   impl->os = os;
+  impl->walFile = (file_t *)&impl[1];
   impl->dbFile = config->dbFile;
+  impl->maxWalSize = config->maxWalSize;
+
+  /* Open file handle on the write-ahead log file. */
+  flags = (UDB_OPEN_READWRITE | UDB_OPEN_CREATE);
+  ret = os_open(os, walName, impl->walFile, flags);
+  if (ret != UDB_OK) {
+    udb_free(retWal);
+  }
 
   return ret;
 }
 
 /* Static internal function implementations */
-static void __init_wal_v1(wal_t *wal, wal_impl_v1_t *impl) {
+static void __init_wal_impl_v1(wal_t *wal, wal_impl_v1_t *impl) {
   wal->impl = impl;
   wal->version = 1;
 

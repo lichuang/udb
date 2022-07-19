@@ -12,4 +12,6 @@ struct os_t {
   int sizeOfFile; /* Size of subclassed file_t */
 };
 
+udb_err_t os_open(os_t *, const char *path, file_t *file, int flags);
+
 #endif /* _UDB_OS_H_ */
