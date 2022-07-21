@@ -12,10 +12,11 @@ typedef struct udb_t {
 } udb_t;
 
 typedef enum udb_err_t {
-  UDB_OK = 0,      /* Success */
-  UDB_OOM = -1,    /* out of memory */
-  UDB_MISUSE = -2, /* Library used incorrectly */
-  UDB_BUSY = -3,   /* The database file is locked */
+  UDB_OK = 0,       /* Success */
+  UDB_OOM = -1,     /* out of memory */
+  UDB_MISUSE = -2,  /* Library used incorrectly */
+  UDB_BUSY = -3,    /* The database file is locked */
+  UDB_CORRUPT = -4, /* The database disk image is malformed */
 } udb_err_t;
 
 #endif /* _UDB_H_ */

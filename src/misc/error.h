@@ -12,8 +12,12 @@
 */
 udb_err_t error_report(udb_err_t err, int lineno, const char *type);
 
+udb_err_t err_corrupt(int);
+
 udb_err_t error_misuse(int);
 
 #define UDB_MISUSE_BKPT error_misuse(__LINE__)
+
+#define UDB_CORRUPT_BKPT err_corrupt(__LINE__)
 
 #endif /* _UDB_ERROR_H_ */

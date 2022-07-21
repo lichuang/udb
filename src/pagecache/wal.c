@@ -18,6 +18,14 @@ udb_err_t wal_close(wal_t *wal) {
   udb_free(wal);
 }
 
+/*
+** Search the wal file for page id. If found, set *frame to the frame that
+** contains the page. Otherwise, if id is not in the wal file, set *frame
+** to zero.
+**
+** Return UDB_OK if successful, or an error code if an error occurs. If an
+** error does occur, the final value of *frame is undefined.
+*/
 udb_err_t wal_find_frame(wal_t *wal, page_id_t id, wal_frame_t *frame) {
   wal->methods.FindFrame(wal->impl, id, frame);
 }

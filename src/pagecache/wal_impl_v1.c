@@ -1,30 +1,293 @@
 #include <stdio.h>
 
 #include "memory/alloc.h"
+#include "misc/atomic.h"
+#include "misc/error.h"
 #include "os/file.h"
 #include "os/os.h"
 #include "wal.h"
+
+typedef struct wal_index_header_t wal_index_header_t;
+typedef struct wal_checkpoint_t wal_checkpoint_t;
+typedef struct wal_hash_location_t wal_hash_location_t;
+
+/*
+** Index numbers for various locking bytes.   WAL_NREADER is the number
+** of available reader locks and should be at least 3.  The default
+** is SQLITE_SHM_NLOCK==8 and  WAL_NREADER==5.
+**
+** Technically, the various VFSes are free to implement these locks however
+** they see fit.  However, compatibility is encouraged so that VFSes can
+** interoperate.  The standard implemention used on both unix and windows
+** is for the index number to indicate a byte offset into the
+** WalCkptInfo.aLock[] array in the wal-index header.  In other words, all
+** locks are on the shm file.  The WALINDEX_LOCK_OFFSET constant (which
+** should be 120) is the location in the shm file for the first locking
+** byte.
+*/
+
+#define SQLITE_SHM_NLOCK 8
+
+// 写锁在所有锁中的偏移量
+#define WAL_WRITE_LOCK 0
+// 除了写锁以外的其他所有锁
+#define WAL_ALL_BUT_WRITE 1
+// checkpoint锁在所有锁中的偏移量
+#define WAL_CKPT_LOCK 1
+// 恢复锁在所有锁中的偏移量
+#define WAL_RECOVER_LOCK 2
+// 输入读锁索引，返回对应读锁在所有锁中的偏移量，因为读锁从3开始，所以+3
+#define WAL_READ_LOCK(I) (3 + (I))
+// 读索引的数量 = 所有锁数量 - 读锁起始位置3
+#define WAL_NREADER (SQLITE_SHM_NLOCK - 3)
+
+/*
+** The following object holds a copy of the wal-index header content.
+**
+** The actual header in the wal-index consists of two copies of this
+** object followed by one instance of the WalCkptInfo object.
+** For all versions of SQLite through 3.10.0 and probably beyond,
+** the locking bytes (WalCkptInfo.aLock) start at offset 120 and
+** the total header size is 136 bytes.
+**
+** The szPage value can be any power of 2 between 512 and 32768, inclusive.
+** Or it can be 1 to represent a 65536-byte page.  The latter case was
+** added in 3.7.1 when support for 64K pages was added.
+*/
+struct wal_index_header_t {
+  uint32_t version;       /* Wal-index version */
+  uint32_t unused;        /* Unused (padding) field */
+  uint32_t txnCnt;        /* Counter incremented each transaction */
+  bool isInit;            /* true when initialized */
+  uint8_t bigEndCksum;    /* True if checksums in WAL are big-endian */
+  int pageSize;           /* Database page size in bytes. */
+  wal_frame_t maxFrame;   /* Index of last valid frame in the WAL */
+  uint32_t pageNum;       /* Size of database in pages */
+  uint32_t frameCksum[2]; /* Checksum of last frame in log */
+  uint32_t salt[2];       /* Two salt values copied from WAL header */
+  uint32_t ckSum[2];      /* Checksum over all prior fields */
+};
+
+/*
+** A copy of the following object occurs in the wal-index immediately
+** following the second copy of the WalIndexHdr.  This object stores
+** information used by checkpoint.
+**
+** nBackfill is the number of frames in the WAL that have been written
+** back into the database. (We call the act of moving content from WAL to
+** database "backfilling".)  The nBackfill number is never greater than
+** WalIndexHdr.mxFrame.  nBackfill can only be increased by threads
+** holding the WAL_CKPT_LOCK lock (which includes a recovery thread).
+** However, a WAL_WRITE_LOCK thread can move the value of nBackfill from
+** mxFrame back to zero when the WAL is reset.
+**
+** nBackfillAttempted is the largest value of nBackfill that a checkpoint
+** has attempted to achieve.  Normally nBackfill==nBackfillAtempted, however
+** the nBackfillAttempted is set before any backfilling is done and the
+** nBackfill is only set after all backfilling completes.  So if a checkpoint
+** crashes, nBackfillAttempted might be larger than nBackfill.  The
+** WalIndexHdr.mxFrame must never be less than nBackfillAttempted.
+**
+** The aLock[] field is a set of bytes used for locking.  These bytes should
+** never be read or written.
+**
+** There is one entry in aReadMark[] for each reader lock.  If a reader
+** holds read-lock K, then the value in aReadMark[K] is no greater than
+** the mxFrame for that reader.  The value READMARK_NOT_USED (0xffffffff)
+** for any aReadMark[] means that entry is unused.  aReadMark[0] is
+** a special case; its value is never used and it exists as a place-holder
+** to avoid having to offset aReadMark[] indexs by one.  Readers holding
+** WAL_READ_LOCK(0) always ignore the entire WAL and read all content
+** directly from the database.
+**
+** The value of aReadMark[K] may only be changed by a thread that
+** is holding an exclusive lock on WAL_READ_LOCK(K).  Thus, the value of
+** aReadMark[K] cannot changed while there is a reader is using that mark
+** since the reader will be holding a shared lock on WAL_READ_LOCK(K).
+**
+** The checkpointer may only transfer frames from WAL to database where
+** the frame numbers are less than or equal to every aReadMark[] that is
+** in use (that is, every aReadMark[j] for which there is a corresponding
+** WAL_READ_LOCK(j)).  New readers (usually) pick the aReadMark[] with the
+** largest value and will increase an unused aReadMark[] to mxFrame if there
+** is not already an aReadMark[] equal to mxFrame.  The exception to the
+** previous sentence is when nBackfill equals mxFrame (meaning that everything
+** in the WAL has been backfilled into the database) then new readers
+** will choose aReadMark[0] which has value 0 and hence such reader will
+** get all their all content directly from the database file and ignore
+** the WAL.
+**
+** Writers normally append new frames to the end of the WAL.  However,
+** if nBackfill equals mxFrame (meaning that all WAL content has been
+** written back into the database) and if no readers are using the WAL
+** (in other words, if there are no WAL_READ_LOCK(i) where i>0) then
+** the writer will first "reset" the WAL back to the beginning and start
+** writing new content beginning at frame 1.
+**
+** We assume that 32-bit loads are atomic and so no locks are needed in
+** order to read from any aReadMark[] entries.
+*/
+struct wal_checkpoint_t {
+  uint32_t backfillFrame;         /* Number of WAL frames backfilled into DB */
+  uint32_t readMark[WAL_NREADER]; /* Reader marks */
+  uint8_t lock[SQLITE_SHM_NLOCK]; /* Reserved space for locks */
+  uint32_t backfillAttempted;     /* WAL frames perhaps written, or maybe not */
+  uint32_t notUsed0;              /* Available for future enhancements */
+};
+#define READMARK_NOT_USED 0xffffffff
+
+/* A block of WALINDEX_LOCK_RESERVED bytes beginning at
+** WALINDEX_LOCK_OFFSET is reserved for locks. Since some systems
+** only support mandatory file-locks, we do not read or write data
+** from the region of the file on which locks are applied.
+*/
+#define WALINDEX_LOCK_OFFSET                                                   \
+  (sizeof(wal_index_header_t) * 2 + offsetof(wal_checkpoint_t, lock))
+#define WALINDEX_HEADER_SIZE                                                   \
+  (sizeof(wal_index_header_t) * 2 + sizeof(wal_checkpoint_t))
+
+/* Size of header before each frame in wal */
+#define WAL_FRAME_HEADERSIZE 24
+
+/* Size of write ahead log header, including checksum. */
+#define WAL_HEADERSIZE 32
+
+/*
+** Define the parameters of the hash tables in the wal-index file. There
+** is a hash-table following every HASHTABLE_NPAGE page numbers in the
+** wal-index.
+**
+** Changing any of these constants will alter the wal-index format and
+** create incompatibilities.
+*/
+#define HASHTABLE_NPAGE 4096                  /* Must be power of 2 */
+#define HASHTABLE_HASH_1 383                  /* Should be prime */
+#define HASHTABLE_NSLOT (HASHTABLE_NPAGE * 2) /* Must be a power of 2 */
+
+/*
+** The block of page numbers associated with the first hash-table in a
+** wal-index is smaller than usual. This is so that there is a complete
+** hash-table on each aligned 32KB page of the wal-index.
+*/
+#define HASHTABLE_NPAGE_ONE                                                    \
+  (HASHTABLE_NPAGE - (WALINDEX_HEADER_SIZE / sizeof(uint32_t)))
+
+/*
+** Each page of the wal-index mapping contains a hash-table made up of
+** an array of HASHTABLE_NSLOT elements of the following type.
+*/
+typedef uint16_t hash_slot_t;
+
+/*
+** An instance of the wal_hash_location_t object is used to describe the
+** location of a page hash table in the wal-index.
+** This becomes the return *value from __wal_hash_get().
+*/
+struct wal_hash_location_t {
+  volatile hash_slot_t *hash; /* Start of the wal-index hash table */
+  volatile page_id_t *pageId; /* pageId[1] is the page of first frame indexed */
+  wal_frame_t zeroFrame; /* One less than the frame number of first indexed */
+};
 
 /*
 ** An open write-ahead log file is represented by an instance of the
 ** following object.
 */
 typedef struct wal_impl_v1_t {
-  os_t *os;            /* The os object used to create dbFile */
-  file_t *dbFile;      /* File handle for the database file */
-  file_t *walFile;     /* File handle for WAL file */
-  uint64_t maxWalSize; /* Truncate WAL to this size upon reset */
+  os_t *os;                         /* The os object used to create dbFile */
+  file_t *dbFile;                   /* File handle for the database file */
+  file_t *walFile;                  /* File handle for WAL file */
+  uint64_t maxWalSize;              /* Truncate WAL to this size upon reset */
+  int walIndexSize;                 /* Size of array walIndexData */
+  volatile uint32_t **walIndexData; /* Pointer to wal-index content in memory */
+  int pageSize;                     /* Database page size */
+  int16_t readLock;          /* Which read lock is being held.  -1 for none */
+  wal_index_header_t header; /* Wal-index header for current transaction */
+  wal_frame_t minFrame;      /* Ignore wal frames before this one */
+
+#ifdef UDB_DEBUG
+  bool lockError; /* True if a locking error has occurred */
+#endif
 } wal_impl_v1_t;
 
 /* Static wal impl methods function forward declarations */
-udb_err_t __FindFrame_v1(wal_impl_t *, page_id_t, wal_frame_t *);
+udb_err_t __FindFrame_impl_v1(wal_impl_t *, page_id_t, wal_frame_t *);
 void __Destroy_v1(wal_impl_t *);
 
 /* Static internal function forward declarations */
 static void __init_wal_impl_v1(wal_t *, wal_impl_v1_t *);
+static int __wal_frame_hash_index(wal_frame_t frame);
+static udb_err_t __wal_hash_get(wal_impl_v1_t *, int, wal_hash_location_t *);
+static int __wal_hash_index(page_id_t id);
+static int __wal_next_hash(int);
+static udb_err_t __wal_index_page(wal_impl_v1_t *, int, volatile uint32_t **);
 
-/* Static wal impl methods function forward declarations */
-udb_err_t __FindFrame_v1(wal_impl_t *impl, page_id_t id, wal_frame_t *frame) {}
+/* Static wal impl methods function forward implementations */
+
+udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_id_t id,
+                              wal_frame_t *retFrame) {
+  wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+  wal_frame_t readFrame = 0; /* If !=0, WAL frame to return data from */
+  wal_frame_t lastFrame =
+      impl->header.maxFrame; /* Last page in WAL for this reader */
+  int hash;                  /* Used to loop through N hash tables */
+  int minHash;
+
+  *retFrame = 0;
+
+  /* This routine is only be called from within a read transaction. */
+  assert(impl->readLock >= 0
+#ifdef UDB_DEBUG
+         || impl->lockError
+#endif
+  );
+
+  /* If the "last page" field of the wal-index header snapshot is 0, then
+  ** no data will be read from the wal under any circumstances. Return early
+  ** in this case as an optimization.  Likewise, if pWal->readLock==0,
+  ** then the WAL is ignored by the reader so return early, as if the
+  ** WAL were empty.
+  */
+  if (lastFrame == 0 || impl->readLock == 0) {
+    return UDB_OK;
+  }
+
+  minHash = __wal_frame_hash_index(impl->minFrame);
+  for (hash = __wal_frame_hash_index(lastFrame); hash >= minHash; hash--) {
+    wal_hash_location_t location; /* Hash table location */
+    int key;                      /* Hash slot index */
+    int collideNum;               /* Number of hash collisions remaining */
+    udb_err_t rc;                 /* Error code */
+    hash_slot_t hashSlot;
+
+    rc = __wal_hash_get(impl, hash, &location);
+    if (rc != UDB_OK) {
+      return rc;
+    }
+
+    collideNum = HASHTABLE_NSLOT;
+    key = __wal_hash_index(id);
+    while ((hashSlot = AtomicLoad(&location.hash[key])) != 0) {
+      wal_frame_t frame = hashSlot + location.zeroFrame;
+      if (frame <= lastFrame && frame >= impl->minFrame &&
+          location.pageId[hashSlot] == id) {
+        assert(frame > readFrame);
+        readFrame = frame;
+      }
+      if ((collideNum--) == 0) {
+        return UDB_CORRUPT_BKPT;
+      }
+
+      key = __wal_next_hash(key);
+    }
+    if (readFrame != 0) {
+      break;
+    }
+  }
+
+  *retFrame = readFrame;
+  return UDB_OK;
+}
 
 void __Destroy_v1(wal_impl_t *impl) {}
 
@@ -94,7 +357,64 @@ static void __init_wal_impl_v1(wal_t *wal, wal_impl_v1_t *impl) {
   wal->version = 1;
 
   wal->methods = (wal_methods_t){
-      __FindFrame_v1, /* FindFrame */
-      __Destroy_v1,   /* Destroy */
+      __FindFrame_impl_v1, /* FindFrame */
+      __Destroy_v1,        /* Destroy */
   };
+}
+
+/*
+** Return the number of the wal-index page that contains the hash-table
+** and page-number array that contain entries corresponding to WAL frame
+** iFrame. The wal-index is broken up into 32KB pages. Wal-index pages
+** are numbered starting from 0.
+*/
+static int __wal_frame_hash_index(wal_frame_t frame) {
+  int hash =
+      (frame + HASHTABLE_NPAGE - HASHTABLE_NPAGE_ONE - 1) / HASHTABLE_NPAGE;
+  assert((hash == 0 || frame > HASHTABLE_NPAGE_ONE) &&
+         (hash >= 1 || frame <= HASHTABLE_NPAGE_ONE) &&
+         (hash <= 1 || frame > (HASHTABLE_NPAGE_ONE + HASHTABLE_NPAGE)) &&
+         (hash >= 2 || frame <= HASHTABLE_NPAGE_ONE + HASHTABLE_NPAGE) &&
+         (hash <= 2 || frame > (HASHTABLE_NPAGE_ONE + 2 * HASHTABLE_NPAGE)));
+  assert(hash >= 0);
+  return hash;
+}
+
+/*
+** Return pointers to the hash table and page number array stored on
+** page hash of the wal-index. The wal-index is broken into 32KB pages
+** numbered starting from 0.
+**
+** Set output variable location->hash to point to the start of the hash table
+** in the wal-index file. Set location->zeroFrame to one less than the frame
+** number of the first frame indexed by this hash table. If a
+** slot in the hash table is set to N, it refers to frame number
+** (location->zeroFrame+N) in the log.
+**
+** Finally, set location->pageId so that location->pageId[1] is the page number
+** of the first frame indexed by the hash table,
+** frame (location->zeroFrame+1).
+*/
+static udb_err_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
+                                wal_hash_location_t *location) {
+  udb_err_t rc = UDB_OK;
+
+  rc = __wal_index_page(impl, hash, &location->pageId);
+  assert(rc == UDB_OK || hash > 0);
+
+  if (rc != UDB_OK) {
+    return rc;
+  }
+
+  location->hash = (volatile hash_slot_t *)&location->pageId[HASHTABLE_NPAGE];
+  if (hash == 0) {
+    location->pageId =
+        &location->pageId[WALINDEX_HEADER_SIZE / sizeof(uint32_t)];
+    location->zeroFrame = 0;
+  } else {
+    location->zeroFrame = HASHTABLE_NPAGE_ONE + (hash - 1) * HASHTABLE_NPAGE;
+  }
+  location->pageId = &location->pageId[-1];
+
+  return rc;
 }
