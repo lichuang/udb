@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#include "memory/alloc.h"
+#include "memory/memory.h"
 #include "misc/atomic.h"
 #include "misc/error.h"
 #include "os/file.h"
@@ -185,7 +185,7 @@ typedef uint16_t hash_slot_t;
 */
 struct wal_hash_location_t {
   volatile hash_slot_t *hash; /* Start of the wal-index hash table */
-  volatile page_id_t *pageId; /* pageId[1] is the page of first frame indexed */
+  volatile page_no_t *pageNo; /* pageNo[1] is the page of first frame indexed */
   wal_frame_t zeroFrame; /* One less than the frame number of first indexed */
 };
 
@@ -211,20 +211,24 @@ typedef struct wal_impl_v1_t {
 } wal_impl_v1_t;
 
 /* Static wal impl methods function forward declarations */
-udb_err_t __FindFrame_impl_v1(wal_impl_t *, page_id_t, wal_frame_t *);
+udb_err_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
 void __Destroy_v1(wal_impl_t *);
 
 /* Static internal function forward declarations */
 static void __init_wal_impl_v1(wal_t *, wal_impl_v1_t *);
 static int __wal_frame_hash_index(wal_frame_t frame);
 static udb_err_t __wal_hash_get(wal_impl_v1_t *, int, wal_hash_location_t *);
-static int __wal_hash_index(page_id_t id);
+static int __wal_hash_index(page_no_t no);
 static int __wal_next_hash(int);
-static udb_err_t __wal_index_page(wal_impl_v1_t *, int, volatile uint32_t **);
+static inline udb_err_t __wal_index_page(wal_impl_v1_t *, int,
+                                         volatile uint32_t **);
+
+static udb_err_t __wal_index_page_realloc(wal_impl_v1_t *, int,
+                                          volatile uint32_t **);
 
 /* Static wal impl methods function forward implementations */
 
-udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_id_t id,
+udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
                               wal_frame_t *retFrame) {
   wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
   wal_frame_t readFrame = 0; /* If !=0, WAL frame to return data from */
@@ -266,11 +270,11 @@ udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_id_t id,
     }
 
     collideNum = HASHTABLE_NSLOT;
-    key = __wal_hash_index(id);
+    key = __wal_hash_index(no);
     while ((hashSlot = AtomicLoad(&location.hash[key])) != 0) {
       wal_frame_t frame = hashSlot + location.zeroFrame;
       if (frame <= lastFrame && frame >= impl->minFrame &&
-          location.pageId[hashSlot] == id) {
+          location.pageNo[hashSlot] == no) {
         assert(frame > readFrame);
         readFrame = frame;
       }
@@ -326,8 +330,8 @@ udb_err_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
 
   *wal = NULL;
 
-  retWal = (wal_t *)udb_calloc(sizeof(wal_t) + sizeof(wal_impl_v1_t) +
-                               os->sizeOfFile);
+  retWal = (wal_t *)memory_calloc(sizeof(wal_t) + sizeof(wal_impl_v1_t) +
+                                  os->sizeOfFile);
   if (retWal == NULL) {
     return UDB_OOM;
   }
@@ -345,7 +349,7 @@ udb_err_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
   flags = (UDB_OPEN_READWRITE | UDB_OPEN_CREATE);
   ret = os_open(os, walName, impl->walFile, flags);
   if (ret != UDB_OK) {
-    udb_free(retWal);
+    memory_free(retWal);
   }
 
   return ret;
@@ -391,7 +395,7 @@ static int __wal_frame_hash_index(wal_frame_t frame) {
 ** slot in the hash table is set to N, it refers to frame number
 ** (location->zeroFrame+N) in the log.
 **
-** Finally, set location->pageId so that location->pageId[1] is the page number
+** Finally, set location->pageNo so that location->pageNo[1] is the page number
 ** of the first frame indexed by the hash table,
 ** frame (location->zeroFrame+1).
 */
@@ -399,22 +403,91 @@ static udb_err_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
                                 wal_hash_location_t *location) {
   udb_err_t rc = UDB_OK;
 
-  rc = __wal_index_page(impl, hash, &location->pageId);
+  rc = __wal_index_page(impl, hash, &location->pageNo);
   assert(rc == UDB_OK || hash > 0);
 
   if (rc != UDB_OK) {
     return rc;
   }
 
-  location->hash = (volatile hash_slot_t *)&location->pageId[HASHTABLE_NPAGE];
+  location->hash = (volatile hash_slot_t *)&location->pageNo[HASHTABLE_NPAGE];
   if (hash == 0) {
-    location->pageId =
-        &location->pageId[WALINDEX_HEADER_SIZE / sizeof(uint32_t)];
+    location->pageNo =
+        &location->pageNo[WALINDEX_HEADER_SIZE / sizeof(uint32_t)];
     location->zeroFrame = 0;
   } else {
     location->zeroFrame = HASHTABLE_NPAGE_ONE + (hash - 1) * HASHTABLE_NPAGE;
   }
-  location->pageId = &location->pageId[-1];
+  location->pageNo = &location->pageNo[-1];
 
+  return rc;
+}
+
+/*
+** Compute a hash on a page number.  The resulting hash value must land
+** between 0 and (HASHTABLE_NSLOT-1).
+** The __wal_next_hash() function advances the hash to the next value
+** in the event of a collision.
+*/
+static int __wal_hash_index(page_no_t no) {
+  assert(no > 0);
+  assert((HASHTABLE_NSLOT & (HASHTABLE_NSLOT - 1)) == 0);
+  return (no * HASHTABLE_HASH_1) & (HASHTABLE_NSLOT - 1);
+}
+
+static inline int __wal_next_hash(int priorHash) {
+  return (priorHash + 1) & (HASHTABLE_NSLOT - 1);
+}
+
+static udb_err_t __wal_index_page(wal_impl_v1_t *impl, int hash,
+                                  volatile uint32_t **pageNo) {
+  if (impl->walIndexSize <= hash || (*pageNo = impl->walIndexData[hash]) == 0) {
+    return __wal_index_page_realloc(impl, hash, pageNo);
+  }
+  return UDB_OK;
+}
+
+/*
+** Obtain a pointer to the iPage'th page of the wal-index. The wal-index
+** is broken into pages of WAL_INDEX_PAGE_SIZE bytes. Wal-index pages are
+** numbered from zero.
+**
+** If the wal-index is currently smaller the iPage pages then the size
+** of the wal-index might be increased, but only if it is safe to do
+** so.  It is safe to enlarge the wal-index if pWal->writeLock is true
+** or pWal->exclusiveMode==WAL_HEAPMEMORY_MODE.
+**
+** If this call is successful, *ppPage is set to point to the wal-index
+** page and SQLITE_OK is returned. If an error (an OOM or VFS error) occurs,
+** then an SQLite error code is returned and *ppPage is set to 0.
+*/
+static udb_err_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
+                                          volatile uint32_t **pageNo) {
+  udb_err_t rc = UDB_OK;
+
+  *pageNo = NULL;
+  /* Enlarge the pWal->apWiData[] array if required */
+  if (impl->walIndexSize <= hash) {
+    uint32_t byte = sizeof(uint32_t) * (hash + 1);
+    uint32_t **new = (uint32_t **)memory_realloc(impl->walIndexData, byte);
+    if (new == NULL) {
+      return;
+    }
+    memset((void *)&new[impl->walIndexSize], 0,
+           sizeof(uint32_t *) * (hash + 1 - impl->walIndexSize));
+    impl->walIndexData = new;
+    impl->walIndexSize = hash + 1;
+  }
+
+  /* Request a pointer to the required page from the VFS */
+  assert(impl->walIndexData[hash] == NULL);
+
+  impl->walIndexData[hash] = (uint32_t *)memory_calloc(WAL_INDEX_PAGE_SIZE);
+  if (impl->walIndexData[hash] == NULL) {
+    rc = UDB_OOM;
+  }
+
+  *pageNo = impl->walIndexData[hash];
+  assert(hash == 0 || *pageNo != NULL || rc != UDB_OK);
   return rc;
 }

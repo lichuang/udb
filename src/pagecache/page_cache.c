@@ -3,7 +3,7 @@
 
 #include "global.h"
 #include "macros.h"
-#include "memory/alloc.h"
+#include "memory/memory.h"
 #include "page.h"
 #include "pagecache/page_cache.h"
 
@@ -53,7 +53,7 @@ typedef enum MANAGE_DIRTY_LIST_FLAG {
 } MANAGE_DIRTY_LIST_FLAG;
 
 /* Static internal function forward declarations */
-static page_t *__fetch_finish_with_init(page_cache_t *, page_id_t,
+static page_t *__fetch_finish_with_init(page_cache_t *, page_no_t,
                                         cache_item_base_t *);
 static void __unpin_page(page_t *);
 static void __manage_dirty_list(page_t *, MANAGE_DIRTY_LIST_FLAG);
@@ -64,7 +64,7 @@ static bool __page_sanity(page_t *);
 
 /* Static internal function implementations */
 
-static page_t *__fetch_finish_with_init(page_cache_t *cache, page_id_t id,
+static page_t *__fetch_finish_with_init(page_cache_t *cache, page_no_t no,
                                         cache_item_base_t *base) {
   page_t *page = NULL;
   assert(base != NULL);
@@ -232,7 +232,7 @@ udb_err_t cache_set_page_size(page_cache_t *cache, int pageSize) {
 /*
  ** fetch an item from cache by the page id.
  */
-cache_item_base_t *cache_fetch(page_cache_t *cache, page_id_t id,
+cache_item_base_t *cache_fetch(page_cache_t *cache, page_no_t no,
                                cache_create_flag_t createFlag) {
   cache_create_flag_t newCreateFlag;
   cache_item_base_t *base;
@@ -266,7 +266,7 @@ cache_item_base_t *cache_fetch(page_cache_t *cache, page_id_t id,
 **
 ** This routine should be invoked only after cache_fetch() fails.
 */
-udb_err_t cache_fetch_stress(page_cache_t *cache, page_id_t id, page_t **page) {
+udb_err_t cache_fetch_stress(page_cache_t *cache, page_no_t no, page_t **page) {
   page_t *p;
   udb_err_t err = UDB_OK;
 
@@ -313,7 +313,7 @@ udb_err_t cache_fetch_stress(page_cache_t *cache, page_id_t id, page_t **page) {
 ** must be called after cache_fetch() in order to get a usable
 ** result.
 */
-page_t *cache_fetch_finish(page_cache_t *cache, page_id_t id,
+page_t *cache_fetch_finish(page_cache_t *cache, page_no_t no,
                            cache_item_base_t *base) {
   page_t *page = NULL;
 

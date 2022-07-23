@@ -52,7 +52,7 @@ struct cache_methods_t {
   cache_module_t *(*Create)(int, int);
   void (*CacheSize)(cache_module_t *, int nCacheSize);
   int (*PageCount)(cache_module_t *);
-  cache_item_base_t *(*Fetch)(cache_module_t *, page_id_t key,
+  cache_item_base_t *(*Fetch)(cache_module_t *, page_no_t key,
                               cache_create_flag_t flag);
   void (*Unpin)(cache_module_t *, cache_item_base_t *, bool);
   void (*Destroy)(cache_module_t *);
@@ -80,9 +80,9 @@ void cache_close(page_cache_t *);
 /* Modify the page size after the cache has been created. */
 udb_err_t cache_set_page_size(page_cache_t *, int);
 
-cache_item_base_t *cache_fetch(page_cache_t *, page_id_t, cache_create_flag_t);
-udb_err_t cache_fetch_stress(page_cache_t *, page_id_t, page_t **);
-page_t *cache_fetch_finish(page_cache_t *, page_id_t, cache_item_base_t *);
+cache_item_base_t *cache_fetch(page_cache_t *, page_no_t, cache_create_flag_t);
+udb_err_t cache_fetch_stress(page_cache_t *, page_no_t, page_t **);
+page_t *cache_fetch_finish(page_cache_t *, page_no_t, cache_item_base_t *);
 void cache_release_page(page_t *);
 
 void cache_drop(page_t *);

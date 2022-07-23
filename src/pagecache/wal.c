@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 
-#include "memory/alloc.h"
+#include "memory/memory.h"
 #include "os/os.h"
 #include "wal.h"
 
@@ -15,7 +15,7 @@ udb_err_t wal_open(wal_config_t *config, wal_t **wal) {
 
 udb_err_t wal_close(wal_t *wal) {
   wal->methods.Destroy(wal->impl);
-  udb_free(wal);
+  memory_free(wal);
 }
 
 /*
@@ -26,6 +26,6 @@ udb_err_t wal_close(wal_t *wal) {
 ** Return UDB_OK if successful, or an error code if an error occurs. If an
 ** error does occur, the final value of *frame is undefined.
 */
-udb_err_t wal_find_frame(wal_t *wal, page_id_t id, wal_frame_t *frame) {
+udb_err_t wal_find_frame(wal_t *wal, page_no_t no, wal_frame_t *frame) {
   wal->methods.FindFrame(wal->impl, id, frame);
 }

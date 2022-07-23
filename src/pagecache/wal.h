@@ -13,7 +13,7 @@ struct wal_config_t {
 };
 
 struct wal_methods_t {
-  udb_err_t (*FindFrame)(wal_impl_t *, page_id_t, wal_frame_t *);
+  udb_err_t (*FindFrame)(wal_impl_t *, page_no_t, wal_frame_t *);
   void (*Destroy)(wal_impl_t *);
 };
 
@@ -29,7 +29,7 @@ struct wal_t {
 udb_err_t wal_open(wal_config_t *, wal_t **);
 udb_err_t wal_close(wal_t *);
 
-udb_err_t wal_find_frame(wal_t *, page_id_t, wal_frame_t *);
+udb_err_t wal_find_frame(wal_t *, page_no_t, wal_frame_t *);
 udb_err_t wal_read_frame(wal_t *, wal_frame_t, uint32_t, void *);
 
 #endif /* _UDB_WAL_H_ */

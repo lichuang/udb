@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 #include "bplustree/wal.h"
-#include "memory/alloc.h"
+#include "memory/memory.h"
 #include "os/file.h"
 #include "page.h"
 #include "pagecache/page_cache.h"
@@ -35,7 +35,7 @@ struct pager_t {
 };
 
 /* Static internal function forward declarations */
-static inline offset_t from_page_id_to_offset(pager_t *, page_id_t);
+static inline offset_t from_page_id_to_offset(pager_t *, page_no_t);
 static udb_err_t read_db_page(page_t *);
 
 /* Outer function implementations */
@@ -57,7 +57,7 @@ udb_err_t pager_open(udb_t *udb, pager_t **pager) {
     goto open_pager_error;
   }
 
-  *pager = ret_pager = udb_calloc(sizeof(pager_t));
+  *pager = ret_pager = memory_calloc(sizeof(pager_t));
   err = cache_open(&cache);
   if (err != UDB_OK) {
     goto open_pager_error;
@@ -79,18 +79,18 @@ open_pager_error:
     wal_close(wal);
   }
   if (ret_pager != NULL) {
-    udb_free(ret_pager);
+    memory_free(ret_pager);
   }
   *pager = NULL;
   return err;
 }
 
 udb_err_t pager_close(pager_t *pager) {
-  udb_free(pager);
+  memory_free(pager);
   return UDB_OK;
 }
 
-udb_err_t pager_get_page(pager_t *pager, page_id_t id, page_t **page) {
+udb_err_t pager_get_page(pager_t *pager, page_no_t no, page_t **page) {
   page_t *pg = NULL;
   page_t *item = NULL;
   page_cache_t *cache = pager->cache;
@@ -149,7 +149,7 @@ get_page_error:
 /*
  ** Convert the page id to database file offset.
  */
-static inline offset_t from_page_id_to_offset(pager_t *pager, page_id_t id) {
+static inline offset_t from_page_id_to_offset(pager_t *pager, page_no_t no) {
   return (id - 1) * pager->pageSize;
 }
 
@@ -158,7 +158,7 @@ static inline offset_t from_page_id_to_offset(pager_t *pager, page_id_t id) {
  */
 static udb_err_t read_db_page(page_t *page) {
   pager_t *pager = page->pager;
-  page_id_t id = page->id;
+  page_no_t no = page->id;
   udb_err_t err = UDB_OK;
   wal_frame_t frame;
   wal_t *wal = pager->wal;

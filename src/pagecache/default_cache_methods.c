@@ -4,7 +4,7 @@
 #include "fault.h"
 #include "global.h"
 #include "macros.h"
-#include "memory/alloc.h"
+#include "memory/memory.h"
 #include "os/mutex.h"
 #include "pagecache/page_cache.h"
 
@@ -15,7 +15,7 @@ typedef struct page_free_slot_t page_free_slot_t;
 
 struct default_cache_item_t {
   cache_item_base_t base; /* Base class, Must be first. */
-  page_id_t key;          /* Key value (page id) */
+  page_no_t key;          /* Key value (page id) */
   default_cache_t *cache; /* Cache that currently owns this item */
   bool isAnchor;          /* This is the default_cache_group_t.lru element */
   bool isBulkLocal;       /* This item from bulk local storage */
@@ -75,7 +75,7 @@ struct default_cache_t {
   uint32_t minItemNum;          /* The Minimum number of items reserved */
   uint32_t maxItemNum;          /* Configured "cache_size" value */
   uint32_t max90Percent;        /* maxItemNum*9/10 */
-  page_id_t maxKey;             /* Largest key seen since Truncate() */
+  page_no_t maxKey;             /* Largest key seen since Truncate() */
 
   /* Hash table of all pages. The following variables may only be accessed
   ** when the accessor is holding the default_cache_group_t mutex.
@@ -154,14 +154,14 @@ cache_module_t *default_cache_create(int, int);
 void default_cache_cache_size(cache_module_t *, int cachesize);
 int default_cache_page_size(cache_module_t *);
 static cache_item_base_t *default_cache_fetch(cache_module_t *arg,
-                                              page_id_t key,
+                                              page_no_t key,
                                               cache_create_flag_t flag);
 void default_cache_unpin(cache_module_t *, cache_item_base_t *, bool);
 void default_cache_destroy(cache_module_t *);
 
 /* Static internal function forward declarations */
 
-static default_cache_item_t *__init_item_with_key(default_cache_t *, page_id_t,
+static default_cache_item_t *__init_item_with_key(default_cache_t *, page_no_t,
                                                   default_cache_item_t *);
 static default_cache_item_t *__init_item_from_buffer(default_cache_t *, void *,
                                                      bool);
@@ -178,22 +178,22 @@ static void __free_cache_item(default_cache_item_t *);
 
 #if DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX
 static default_cache_item_t *__fetch_item_with_mutex(default_cache_t *,
-                                                     page_id_t key,
+                                                     page_no_t key,
                                                      cache_create_flag_t flag);
 #endif
 
 static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *,
-                                                   page_id_t key,
+                                                   page_no_t key,
                                                    cache_create_flag_t flag);
 
 static default_cache_item_t *__fetch_item_stage2(default_cache_t *cache,
-                                                 page_id_t key,
+                                                 page_no_t key,
                                                  cache_create_flag_t flags);
 
 static bool __cache_init_bulk(default_cache_t *);
 static void *__cache_alloc_buffer(int);
 static void __cache_free_buffer(void *);
-static void __cache_truncate_unsafe(default_cache_t *, page_id_t);
+static void __cache_truncate_unsafe(default_cache_t *, page_no_t);
 static void __cache_enforce_max_item(default_cache_t *);
 
 static void __remove_item_from_hash(default_cache_item_t *,
@@ -203,7 +203,7 @@ static void __cache_resize_hash(default_cache_t *cache);
 /* Static function implementations */
 
 static default_cache_item_t *__init_item_with_key(default_cache_t *cache,
-                                                  page_id_t key,
+                                                  page_no_t key,
                                                   default_cache_item_t *item) {
   assert(cache != NULL);
   assert(item != NULL);
@@ -342,7 +342,7 @@ static default_cache_item_t *__alloc_cache_item(default_cache_t *cache,
   if (benignMalloc) {
     faultBeginBenignMalloc();
   }
-  p = udb_alloc(cache->itemSize);
+  p = memory_alloc(cache->itemSize);
   if (benignMalloc) {
     faultEndBenignMalloc();
   }
@@ -372,7 +372,7 @@ static void __free_cache_item(default_cache_item_t *item) {
 
 #if DEFAULT_CACHE_MIGHT_USE_GROUP_MUTEX
 static default_cache_item_t *__fetch_item_with_mutex(default_cache_t *cache,
-                                                     page_id_t key,
+                                                     page_no_t key,
                                                      cache_create_flag_t flag) {
   default_cache_item_t *item = NULL;
 
@@ -437,7 +437,7 @@ static default_cache_item_t *__fetch_item_with_mutex(default_cache_t *cache,
 ** wrapper invokes the appropriate routine.
 */
 static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *cache,
-                                                   page_id_t key,
+                                                   page_no_t key,
                                                    cache_create_flag_t flag) {
   default_cache_item_t *item = NULL;
 
@@ -470,7 +470,7 @@ static default_cache_item_t *__fetch_item_no_mutex(default_cache_t *cache,
 }
 
 static default_cache_item_t *__fetch_item_stage2(default_cache_t *cache,
-                                                 page_id_t key,
+                                                 page_no_t key,
                                                  cache_create_flag_t flag) {
   default_cache_group_t *group = cache->group;
   default_cache_item_t *item;
@@ -530,7 +530,7 @@ static bool __cache_init_bulk(default_cache_t *cache) {
   }
 
   faultBeginBenignMalloc();
-  bulk = udb_alloc(bulkSize);
+  bulk = memory_alloc(bulkSize);
   faultEndBenignMalloc();
   if (bulk == NULL) {
     return false;
@@ -553,7 +553,7 @@ static bool __cache_init_bulk(default_cache_t *cache) {
 ** Malloc function used within this file to allocate space from the buffer
 ** configured using slotSize option. If no
 ** such buffer exists or there is no space left in it, this function falls
-** back to udb_alloc().
+** back to memory_alloc().
 **
 ** Multiple threads can run this routine at the same time.  Global variables
 ** in defaultCacheGlobal need to be protected via mutex.
@@ -574,7 +574,7 @@ static void *__cache_alloc_buffer(int byte) {
     mutex_leave(defaultCacheGlobal.mutex);
   }
   if (p == NULL) {
-    p = udb_alloc(byte);
+    p = memory_alloc(byte);
   }
 
   return p;
@@ -598,7 +598,7 @@ static void __cache_free_buffer(void *p) {
     assert(defaultCacheGlobal.freeSlotNum <= defaultCacheGlobal.slotNum);
     mutex_leave(defaultCacheGlobal.mutex);
   } else {
-    udb_free(p);
+    memory_free(p);
   }
 }
 
@@ -609,7 +609,7 @@ static void __cache_free_buffer(void *p) {
 **
 ** The default_cache_t mutex must be held when this function is called.
 */
-static void __cache_truncate_unsafe(default_cache_t *cache, page_id_t limit) {
+static void __cache_truncate_unsafe(default_cache_t *cache, page_no_t limit) {
   uint32_t h, stop;
 
   assert(mutex_held(cache->group->mutex));
@@ -672,7 +672,7 @@ static void __cache_enforce_max_item(default_cache_t *cache) {
     __remove_item_from_hash(item, true);
   }
   if (cache->itemNum == 0 && cache->bulk != NULL) {
-    udb_free(cache->bulk);
+    memory_free(cache->bulk);
     cache->bulk = cache->free = NULL;
   }
 }
@@ -725,7 +725,7 @@ static void __cache_resize_hash(default_cache_t *cache) {
     faultBeginBenignMalloc();
   }
 
-  newHash = udb_calloc(sizeof(default_cache_item_t **) * newSlotNum);
+  newHash = memory_calloc(sizeof(default_cache_item_t **) * newSlotNum);
   if (cache->hash) {
     faultEndBenignMalloc();
   }
@@ -747,7 +747,7 @@ static void __cache_resize_hash(default_cache_t *cache) {
       newHash[h] = item;
     }
   }
-  udb_free(cache->hash);
+  memory_free(cache->hash);
   cache->hash = newHash;
   cache->slotNum = newSlotNum;
 }
@@ -829,7 +829,7 @@ cache_module_t *default_cache_create(int pageSize, int extraSize) {
 
   sz = sizeof(default_cache_t) + sizeof(default_cache_group_t) * separateCache;
 
-  cache = (default_cache_t *)udb_calloc(sz);
+  cache = (default_cache_t *)memory_calloc(sz);
   if (cache == NULL) {
     return NULL;
   }
@@ -899,7 +899,7 @@ int default_cache_page_size(cache_module_t *module) {
 ** Implementation of the default_cache_methods.Fetch method.
 */
 static cache_item_base_t *default_cache_fetch(cache_module_t *module,
-                                              page_id_t key,
+                                              page_no_t key,
                                               cache_create_flag_t flag) {
   default_cache_t *cache = (default_cache_t *)module;
   assert(cache->slotNum > 0);
@@ -962,16 +962,16 @@ void default_cache_destroy(cache_module_t *p) {
   __calc_group_max_pinned_item_num(grp);
   __cache_enforce_max_item(cache);
   defaultCacheLeaveMutex(grp);
-  udb_free(cache->bulk);
-  udb_free(cache->hash);
-  udb_free(cache);
+  memory_free(cache->bulk);
+  memory_free(cache->hash);
+  memory_free(cache);
 }
 
 int cache_setup_buffer(int pageSize, int pageNum) {
   assert(VALID_PAGE_SIZE(pageSize));
   assert(pageNum > 0);
 
-  void *buffer = udb_calloc(pageSize * pageNum);
+  void *buffer = memory_calloc(pageSize * pageNum);
   if (buffer == NULL) {
     return UDB_OOM;
   }

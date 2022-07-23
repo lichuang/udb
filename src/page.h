@@ -18,7 +18,7 @@ struct page_t {
   page_cache_t *cache; /* PRIVATE: Cache that owns this page */
   page_t *dirty;       /* Transient list of dirty sorted by pgno */
   pager_t *pager;      /* The pager this page is part of */
-  page_id_t id;        /* Page number for this page */
+  page_no_t no;        /* Page number for this page */
   uint16_t flags;      /* PAGE_FLAG flags defined below */
 
   /**********************************************************************
