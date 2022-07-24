@@ -28,7 +28,7 @@ struct global_config_t {
   int pageNum;                            /* Number of pages in page[] */
 };
 
-udb_err_t udb_config(int, ...);
+udb_code_t udb_config(int, ...);
 
 extern global_config_t udbGlobalConfig;
 

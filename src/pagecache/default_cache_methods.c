@@ -148,7 +148,7 @@ static const uint32_t MIN_HASH_SLOT_NUM = 256;
 #define ITEM_IS_UNPINNED(p) ((p)->lruNext != NULL)
 
 /* The default cache method forward declarations */
-udb_err_t default_cache_init(void *);
+udb_code_t default_cache_init(void *);
 void default_cache_shutdown(void *);
 cache_module_t *default_cache_create(int, int);
 void default_cache_cache_size(cache_module_t *, int cachesize);
@@ -757,7 +757,7 @@ static void __cache_resize_hash(default_cache_t *cache) {
 /*
 ** Implementation of the default_cache_methods.Init method.
 */
-udb_err_t default_cache_init(void *notUsed) {
+udb_code_t default_cache_init(void *notUsed) {
   UNUSED_PARAMETER(notUsed);
 
   assert(!defaultCacheGlobal.inited);

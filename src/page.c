@@ -2,7 +2,7 @@
 
 #include "page.h"
 
-udb_err_t page_set_writable(page_t *page) { return UDB_OK; }
+udb_code_t page_set_writable(page_t *page) { return UDB_OK; }
 
 void page_mark_dirty(page_t *page) {
   assert(page->ref > 0);

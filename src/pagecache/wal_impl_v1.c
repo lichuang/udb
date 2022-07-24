@@ -147,10 +147,10 @@ struct wal_checkpoint_t {
   (sizeof(wal_index_header_t) * 2 + sizeof(wal_checkpoint_t))
 
 /* Size of header before each frame in wal */
-#define WAL_FRAME_HEADERSIZE 24
+#define WAL_FRAME_HEADER_SIZE 24
 
 /* Size of write ahead log header, including checksum. */
-#define WAL_HEADERSIZE 32
+#define WAL_HEADER_SIZE 32
 
 /*
 ** Define the parameters of the hash tables in the wal-index file. There
@@ -171,6 +171,20 @@ struct wal_checkpoint_t {
 */
 #define HASHTABLE_NPAGE_ONE                                                    \
   (HASHTABLE_NPAGE - (WALINDEX_HEADER_SIZE / sizeof(uint32_t)))
+
+/*
+** Return the offset of frame in the write-ahead log file,
+** assuming a database page size of pageSize bytes. The offset returned
+** is to the start of the write-ahead log frame-header.
+*/
+#define walFrameOffset(frame, pageSize)                                        \
+  (WAL_HEADERSIZE + ((frame)-1) * (int64_t)((pageSize) + WAL_FRAME_HEADER_SIZE))
+
+/*
+** Possible values for wal_impl_v1_t.readOnly
+*/
+#define WAL_RDWR 0   /* Normal read/write connection */
+#define WAL_RDONLY 1 /* The WAL file is readonly */
 
 /*
 ** Each page of the wal-index mapping contains a hash-table made up of
@@ -202,6 +216,8 @@ typedef struct wal_impl_v1_t {
   volatile uint32_t **walIndexData; /* Pointer to wal-index content in memory */
   int pageSize;                     /* Database page size */
   int16_t readLock;          /* Which read lock is being held.  -1 for none */
+  bool checkpointLock;       /* True if holding a checkpoint lock */
+  uint8_t readOnly;          /* WAL_RDWR, WAL_RDONLY */
   wal_index_header_t header; /* Wal-index header for current transaction */
   wal_frame_t minFrame;      /* Ignore wal frames before this one */
 
@@ -211,25 +227,31 @@ typedef struct wal_impl_v1_t {
 } wal_impl_v1_t;
 
 /* Static wal impl methods function forward declarations */
-udb_err_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
+udb_code_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
+udb_code_t __ReadFrame_impl_v1(wal_impl_t *, wal_frame_t, uint32_t bufferSize,
+                               void *buffer);
+udb_code_t __BeginReadTransaction_impl_v1(wal_impl_t *, bool *);
 void __Destroy_v1(wal_impl_t *);
 
 /* Static internal function forward declarations */
-static void __init_wal_impl_v1(wal_t *, wal_impl_v1_t *);
-static int __wal_frame_hash_index(wal_frame_t frame);
-static udb_err_t __wal_hash_get(wal_impl_v1_t *, int, wal_hash_location_t *);
+static void __initWalImplV1(wal_t *, wal_impl_v1_t *);
+static int __walFrameHashIndex(wal_frame_t frame);
+static udb_code_t __wal_hash_get(wal_impl_v1_t *, int, wal_hash_location_t *);
 static int __wal_hash_index(page_no_t no);
 static int __wal_next_hash(int);
-static inline udb_err_t __wal_index_page(wal_impl_v1_t *, int,
-                                         volatile uint32_t **);
-
-static udb_err_t __wal_index_page_realloc(wal_impl_v1_t *, int,
+static inline udb_code_t __wal_index_page(wal_impl_v1_t *, int,
                                           volatile uint32_t **);
+
+static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *, int,
+                                           volatile uint32_t **);
+
+static udb_code_t __walIndexReadHeader(wal_impl_v1_t *, bool *);
+static udb_code_t __walTryBeginRead(wal_impl_v1_t *, bool *, bool, int);
 
 /* Static wal impl methods function forward implementations */
 
-udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
-                              wal_frame_t *retFrame) {
+udb_code_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
+                               wal_frame_t *retFrame) {
   wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
   wal_frame_t readFrame = 0; /* If !=0, WAL frame to return data from */
   wal_frame_t lastFrame =
@@ -248,7 +270,7 @@ udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
 
   /* If the "last page" field of the wal-index header snapshot is 0, then
   ** no data will be read from the wal under any circumstances. Return early
-  ** in this case as an optimization.  Likewise, if pWal->readLock==0,
+  ** in this case as an optimization.  Likewise, if impl->readLock==0,
   ** then the WAL is ignored by the reader so return early, as if the
   ** WAL were empty.
   */
@@ -256,12 +278,12 @@ udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
     return UDB_OK;
   }
 
-  minHash = __wal_frame_hash_index(impl->minFrame);
-  for (hash = __wal_frame_hash_index(lastFrame); hash >= minHash; hash--) {
+  minHash = __walFrameHashIndex(impl->minFrame);
+  for (hash = __walFrameHashIndex(lastFrame); hash >= minHash; hash--) {
     wal_hash_location_t location; /* Hash table location */
     int key;                      /* Hash slot index */
     int collideNum;               /* Number of hash collisions remaining */
-    udb_err_t rc;                 /* Error code */
+    udb_code_t rc;                /* Error code */
     hash_slot_t hashSlot;
 
     rc = __wal_hash_get(impl, hash, &location);
@@ -293,6 +315,34 @@ udb_err_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
   return UDB_OK;
 }
 
+udb_code_t __ReadFrame_impl_v1(wal_impl_t *arg, wal_frame_t readFrame,
+                               uint32_t bufferSize, void *buffer) {
+  int size;
+  int64_t offset;
+  wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+
+  size = impl->header.pageSize;
+  size = (size & 0xfe00) + ((size & 0x0001) << 16);
+  offset = walFrameOffset(readFrame, size) + WAL_FRAME_HEADER_SIZE;
+
+  return os_read(impl->walFile, buffer, (bufferSize > size ? size : bufferSize),
+                 offset);
+}
+
+udb_code_t __BeginReadTransaction_impl_v1(wal_impl_t *arg, bool *changed) {
+  udb_code_t rc;
+  int count = 0; /* Number of __walTryBeginRead attempts */
+  bool retr wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+
+  assert(!impl->checkpointLock);
+
+  do {
+    rc = __walTryBeginRead(arg, changed, false, ++count);
+  } while (rc == UDB_WAL_RETRY);
+
+  return rc;
+}
+
 void __Destroy_v1(wal_impl_t *impl) {}
 
 /* Static internal function implementations */
@@ -315,8 +365,8 @@ void __Destroy_v1(wal_impl_t *impl) {}
 ** *wal is set to point to a new WAL handle. If an error occurs,
 ** an UDB error code is returned and *wal is left unmodified.
 */
-udb_err_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
-  udb_err_t ret = UDB_OK;
+udb_code_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
+  udb_code_t ret = UDB_OK;
   wal_t *retWal = NULL;
   int flags;             /* Flags passed to OsOpen() */
   os_t *os = config->os; /* os module to open wal and wal-index */
@@ -338,7 +388,7 @@ udb_err_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
 
   impl = (wal_impl_v1_t *)&retWal[1];
   impl->walFile = (file_t *)&impl[1];
-  __init_wal_impl_v1(retWal, impl);
+  __initWalImplV1(retWal, impl);
 
   impl->os = os;
   impl->walFile = (file_t *)&impl[1];
@@ -356,12 +406,13 @@ udb_err_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
 }
 
 /* Static internal function implementations */
-static void __init_wal_impl_v1(wal_t *wal, wal_impl_v1_t *impl) {
+static void __initWalImplV1(wal_t *wal, wal_impl_v1_t *impl) {
   wal->impl = impl;
   wal->version = 1;
 
   wal->methods = (wal_methods_t){
       __FindFrame_impl_v1, /* FindFrame */
+      __ReadFrame_impl_v1, /* ReadFrame */
       __Destroy_v1,        /* Destroy */
   };
 }
@@ -372,7 +423,7 @@ static void __init_wal_impl_v1(wal_t *wal, wal_impl_v1_t *impl) {
 ** iFrame. The wal-index is broken up into 32KB pages. Wal-index pages
 ** are numbered starting from 0.
 */
-static int __wal_frame_hash_index(wal_frame_t frame) {
+static int __walFrameHashIndex(wal_frame_t frame) {
   int hash =
       (frame + HASHTABLE_NPAGE - HASHTABLE_NPAGE_ONE - 1) / HASHTABLE_NPAGE;
   assert((hash == 0 || frame > HASHTABLE_NPAGE_ONE) &&
@@ -399,9 +450,9 @@ static int __wal_frame_hash_index(wal_frame_t frame) {
 ** of the first frame indexed by the hash table,
 ** frame (location->zeroFrame+1).
 */
-static udb_err_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
-                                wal_hash_location_t *location) {
-  udb_err_t rc = UDB_OK;
+static udb_code_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
+                                 wal_hash_location_t *location) {
+  udb_code_t rc = UDB_OK;
 
   rc = __wal_index_page(impl, hash, &location->pageNo);
   assert(rc == UDB_OK || hash > 0);
@@ -439,8 +490,8 @@ static inline int __wal_next_hash(int priorHash) {
   return (priorHash + 1) & (HASHTABLE_NSLOT - 1);
 }
 
-static udb_err_t __wal_index_page(wal_impl_v1_t *impl, int hash,
-                                  volatile uint32_t **pageNo) {
+static udb_code_t __wal_index_page(wal_impl_v1_t *impl, int hash,
+                                   volatile uint32_t **pageNo) {
   if (impl->walIndexSize <= hash || (*pageNo = impl->walIndexData[hash]) == 0) {
     return __wal_index_page_realloc(impl, hash, pageNo);
   }
@@ -454,19 +505,19 @@ static udb_err_t __wal_index_page(wal_impl_v1_t *impl, int hash,
 **
 ** If the wal-index is currently smaller the iPage pages then the size
 ** of the wal-index might be increased, but only if it is safe to do
-** so.  It is safe to enlarge the wal-index if pWal->writeLock is true
-** or pWal->exclusiveMode==WAL_HEAPMEMORY_MODE.
+** so.  It is safe to enlarge the wal-index if impl->writeLock is true
+** or impl->exclusiveMode==WAL_HEAPMEMORY_MODE.
 **
 ** If this call is successful, *ppPage is set to point to the wal-index
 ** page and SQLITE_OK is returned. If an error (an OOM or VFS error) occurs,
 ** then an SQLite error code is returned and *ppPage is set to 0.
 */
-static udb_err_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
-                                          volatile uint32_t **pageNo) {
-  udb_err_t rc = UDB_OK;
+static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
+                                           volatile uint32_t **pageNo) {
+  udb_code_t rc = UDB_OK;
 
   *pageNo = NULL;
-  /* Enlarge the pWal->apWiData[] array if required */
+  /* Enlarge the impl->apWiData[] array if required */
   if (impl->walIndexSize <= hash) {
     uint32_t byte = sizeof(uint32_t) * (hash + 1);
     uint32_t **new = (uint32_t **)memory_realloc(impl->walIndexData, byte);
@@ -489,5 +540,92 @@ static udb_err_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
 
   *pageNo = impl->walIndexData[hash];
   assert(hash == 0 || *pageNo != NULL || rc != UDB_OK);
+  return rc;
+}
+
+/*
+** Attempt to start a read transaction.  This might fail due to a race or
+** other transient condition.  When that happens, it returns UDB_WAL_RETRY to
+** indicate to the caller that it is safe to retry immediately.
+**
+** On success return UDB_OK.  On a permanent failure (such an
+** I/O error or an UDB_BUSY because another process is running
+** recovery) return a positive error code.
+**
+** The useWal parameter is true to force the use of the WAL and disable
+** the case where the WAL is bypassed because it has been completely
+** checkpointed.  If useWal==false then this routine calls
+** __walIndexReadHeader() to make a copy of the wal-index header into
+** impl->header.  If the wal-index header has changed, *changed is set to true
+** (as an indication to the caller that the local page cache is obsolete and
+** needs to be flushed.)  When useWal==true, the wal-index header is assumed to
+** already be loaded and the changed parameter is unused.
+**
+** The caller must set the counter parameter to the number of prior calls to
+** this routine during the current read attempt that returned UDB_WAL_RETRY.
+** This routine will start taking more aggressive measures to clear the
+** race conditions after multiple UDB_WAL_RETRY returns, and after an excessive
+** number of errors will ultimately return UDB_PROTOCOL.  The
+** UDB_PROTOCOL return indicates that some other process has gone rogue
+** and is not honoring the locking protocol.  There is a vanishingly small
+** chance that UDB_PROTOCOL could be returned because of a run of really
+** bad luck when there is lots of contention for the wal-index, but that
+** possibility is so small that it can be safely neglected, we believe.
+**
+** On success, this routine obtains a read lock on
+** WAL_READ_LOCK(impl->readLock).  The impl->readLock integer is
+** in the range 0 <= impl->readLock < WAL_NREADER.  If impl->readLock==(-1)
+** that means the Wal does not hold any read lock.  The reader must not
+** access any database page that is modified by a WAL frame up to and
+** including frame number aReadMark[impl->readLock].  The reader will
+** use WAL frames up to and including impl->hdr.mxFrame if impl->readLock>0
+** Or if impl->readLock==0, then the reader will ignore the WAL
+** completely and get all content directly from the database file.
+** If the useWal parameter is 1 then the WAL will never be ignored and
+** this routine will always set impl->readLock>0 on success.
+** When the read transaction is completed, the caller must release the
+** lock on WAL_READ_LOCK(impl->readLock) and set impl->readLock to -1.
+**
+** This routine uses the nBackfill and aReadMark[] fields of the header
+** to select a particular WAL_READ_LOCK() that strives to let the
+** checkpoint process do as much work as possible.  This routine might
+** update values of the aReadMark[] array in the header, but if it does
+** so it takes care to hold an exclusive lock on the corresponding
+** WAL_READ_LOCK() while changing values.
+*/
+static udb_code_t __walTryBeginRead(wal_impl_v1_t *impl, bool *changed,
+                                    bool useWal, int count) {
+  udb_code_t rc = UDB_OK;
+
+  /* Not currently locked */
+  assert(impl->readLock < 0);
+
+  /* Take steps to avoid spinning forever if there is a protocol error.
+  **
+  ** Circumstances that cause a RETRY should only last for the briefest
+  ** instances of time.  No I/O or other system calls are done while the
+  ** locks are held, so the locks should not be held for very long. But
+  ** if we are unlucky, another process that is holding a lock might get
+  ** paged out or take a page-fault that is time-consuming to resolve,
+  ** during the few nanoseconds that it is holding the lock.  In that case,
+  ** it might take longer than normal for the lock to free.
+  **
+  ** After 5 RETRYs, we begin calling os_sleep().  The first few
+  ** calls to os_sleep() have a delay of 1 microsecond.  Really this
+  ** is more of a scheduler yield than an actual delay.  But on the 10th
+  ** an subsequent retries, the delays start becoming longer and longer,
+  ** so that on the 100th (and last) RETRY we delay for 323 milliseconds.
+  ** The total delay time before giving up is less than 10 seconds.
+  */
+  if (count > 5) {
+    int delayMicroSec = 1; /* Pause time in microseconds */
+    if (count > 100) {
+      return UDB_PROTOCOL;
+    }
+    if (count >= 10) {
+      delayMicroSec = (count - 9) * (count - 9) * 39;
+    }
+    os_sleep(impl->os, delayMicroSec);
+  }
   return rc;
 }

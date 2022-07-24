@@ -13,7 +13,11 @@ struct wal_config_t {
 };
 
 struct wal_methods_t {
-  udb_err_t (*FindFrame)(wal_impl_t *, page_no_t, wal_frame_t *);
+  udb_code_t (*FindFrame)(wal_impl_t *, page_no_t, wal_frame_t *);
+
+  udb_code_t (*ReadFrame)(wal_impl_t *, wal_frame_t, uint32_t, void *);
+
+  udb_code_t (*BeginReadTransaction)(wal_impl_t *, bool *);
   void (*Destroy)(wal_impl_t *);
 };
 
@@ -26,10 +30,19 @@ struct wal_t {
 #define IS_VALID_WAL_FRAME(frame) (frame > 0)
 
 /* Open and close a connection to a write-ahead log. */
-udb_err_t wal_open(wal_config_t *, wal_t **);
-udb_err_t wal_close(wal_t *);
+udb_code_t wal_open(wal_config_t *, wal_t **);
+udb_code_t wal_close(wal_t *);
 
-udb_err_t wal_find_frame(wal_t *, page_no_t, wal_frame_t *);
-udb_err_t wal_read_frame(wal_t *, wal_frame_t, uint32_t, void *);
+/* Used by readers to open (lock) and close (unlock) a snapshot.  A
+** snapshot is like a read-transaction.  It is the state of the database
+** at an instant in time.  sqlite3WalOpenSnapshot gets a read lock and
+** preserves the current state even if the other threads or processes
+** write to or checkpoint the WAL.  sqlite3WalCloseSnapshot() closes the
+** transaction and releases the lock.
+*/
+udb_code_t wal_begin_read_transaction(wal_t *, bool *);
+
+udb_code_t wal_find_frame(wal_t *, page_no_t, wal_frame_t *);
+udb_code_t wal_read_frame(wal_t *, wal_frame_t, uint32_t, void *);
 
 #endif /* _UDB_WAL_H_ */

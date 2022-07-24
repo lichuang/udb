@@ -10,11 +10,11 @@
 ** using sqlite3_log().  The routines also provide a convenient place
 ** to set a debugger breakpoint.
 */
-udb_err_t error_report(udb_err_t err, int lineno, const char *type);
+udb_code_t error_report(udb_code_t err, int lineno, const char *type);
 
-udb_err_t err_corrupt(int);
+udb_code_t err_corrupt(int);
 
-udb_err_t error_misuse(int);
+udb_code_t error_misuse(int);
 
 #define UDB_MISUSE_BKPT error_misuse(__LINE__)
 

@@ -16,8 +16,8 @@ enum udb_open_file_flags_t {
 
 #define udb_file_is_open(file)
 
-udb_err_t udb_file_close(file_t *);
+udb_code_t udb_file_close(file_t *);
 
-udb_err_t udb_file_read(file_t *, void *, uint32_t, offset_t);
+udb_code_t udb_file_read(file_t *, void *, uint32_t, offset_t);
 
 #endif /* _UDB_FILE_H_ */

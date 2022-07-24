@@ -24,9 +24,9 @@ global_config_t udbGlobalConfig = {
 ** threadsafe.  Failure to heed these warnings can lead to unpredictable
 ** behavior.
 */
-udb_err_t udb_config(int op, ...) {
+udb_code_t udb_config(int op, ...) {
   va_list ap;
-  udb_err_t rc = UDB_OK;
+  udb_code_t rc = UDB_OK;
 
   /* udb_config() shall return UDB_MISUSE_BKPT if it is invoked while
   ** the udb library is in use. */

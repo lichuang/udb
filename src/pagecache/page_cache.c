@@ -41,9 +41,9 @@ struct page_cache_t {
   int pageSize;                   /* Size of every page in this cache */
   int extraSize;                  /* Size of extra space for each page */
   cache_create_flag_t createFlag; /* createFlag value for for Fetch() */
-  udb_err_t (*Stress)(void *, page_t *); /* Call to try make a page clean */
-  void *stressArg;                       /* Argument to Stress */
-  cache_module_t *cacheModule;           /* Pluggable cache module */
+  udb_code_t (*Stress)(void *, page_t *); /* Call to try make a page clean */
+  void *stressArg;                        /* Argument to Stress */
+  cache_module_t *cacheModule;            /* Pluggable cache module */
 };
 
 typedef enum MANAGE_DIRTY_LIST_FLAG {
@@ -160,7 +160,7 @@ static bool __page_sanity(page_t *page) {}
 
 extern void cache_use_default_methods();
 
-udb_err_t cache_init() {
+udb_code_t cache_init() {
   if (udbGlobalConfig.cacheMethods->Init == NULL) {
     cache_use_default_methods();
     assert(udbGlobalConfig.cacheMethods->Init != NULL);
@@ -187,7 +187,7 @@ void cache_shutdown() {
 ** to this module, the extra space really ends up being the MemPage
 ** structure in the pager.
 */
-udb_err_t cache_open(cache_config_t *config, page_cache_t *cache) {
+udb_code_t cache_open(cache_config_t *config, page_cache_t *cache) {
   memset(cache, 0, sizeof(page_cache_t));
   cache->extraSize = config->extraSize;
   cache->createFlag = CACHE_CREATE_FLAG_HARD_ALLOCATE;
@@ -208,7 +208,7 @@ void cache_close(page_cache_t *cache) {
 ** Change the page size for page_cache_t object. The caller must ensure that
 ** there are no outstanding page references when this function is called.
 */
-udb_err_t cache_set_page_size(page_cache_t *cache, int pageSize) {
+udb_code_t cache_set_page_size(page_cache_t *cache, int pageSize) {
   assert(cache->refSum == 0 && cache->dirty == NULL);
 
   cache_module_t *cacheModule;
@@ -266,9 +266,10 @@ cache_item_base_t *cache_fetch(page_cache_t *cache, page_no_t no,
 **
 ** This routine should be invoked only after cache_fetch() fails.
 */
-udb_err_t cache_fetch_stress(page_cache_t *cache, page_no_t no, page_t **page) {
+udb_code_t cache_fetch_stress(page_cache_t *cache, page_no_t no,
+                              page_t **page) {
   page_t *p;
-  udb_err_t err = UDB_OK;
+  udb_code_t err = UDB_OK;
 
   *page = NULL;
 

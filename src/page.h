@@ -36,7 +36,7 @@ struct page_t {
 #define PAGE_FLAG_DIRTY 0x002      /* Page is on the page_cache_t.dirty list */
 #define PAGE_FLAG_DONT_WRITE 0x010 /* Do not write content to disk */
 
-udb_err_t page_set_writable(page_t *);
+udb_code_t page_set_writable(page_t *);
 
 void page_mark_dirty(page_t *);
 

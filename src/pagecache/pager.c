@@ -36,17 +36,17 @@ struct pager_t {
 
 /* Static internal function forward declarations */
 static inline offset_t from_page_id_to_offset(pager_t *, page_no_t);
-static udb_err_t read_db_page(page_t *);
+static udb_code_t read_db_page(page_t *);
 
 /* Outer function implementations */
 
-udb_err_t pager_open(udb_t *udb, pager_t **pager) {
+udb_code_t pager_open(udb_t *udb, pager_t **pager) {
   const char *db_path = udb->config.db_path;
   pager_t *ret_pager;
   file_t *db_file = NULL;
   wal_t *wal = NULL;
   page_cache_t *cache = NULL;
-  udb_err_t err = UDB_OK;
+  udb_code_t err = UDB_OK;
 
   err = udb_file_open(db_path, 0, &db_file);
   if (err != UDB_OK) {
@@ -85,16 +85,16 @@ open_pager_error:
   return err;
 }
 
-udb_err_t pager_close(pager_t *pager) {
+udb_code_t pager_close(pager_t *pager) {
   memory_free(pager);
   return UDB_OK;
 }
 
-udb_err_t pager_get_page(pager_t *pager, page_no_t no, page_t **page) {
+udb_code_t pager_get_page(pager_t *pager, page_no_t no, page_t **page) {
   page_t *pg = NULL;
   page_t *item = NULL;
   page_cache_t *cache = pager->cache;
-  udb_err_t err = UDB_OK;
+  udb_code_t err = UDB_OK;
 
   assert(id > 0);
 
@@ -156,10 +156,10 @@ static inline offset_t from_page_id_to_offset(pager_t *pager, page_no_t no) {
 /*
  ** Read the content of page from the database file.
  */
-static udb_err_t read_db_page(page_t *page) {
+static udb_code_t read_db_page(page_t *page) {
   pager_t *pager = page->pager;
   page_no_t no = page->id;
-  udb_err_t err = UDB_OK;
+  udb_code_t err = UDB_OK;
   wal_frame_t frame;
   wal_t *wal = pager->wal;
   file_t *db = pager->db_file;
