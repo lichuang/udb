@@ -245,8 +245,13 @@ static inline udb_code_t __wal_index_page(wal_impl_v1_t *, int,
 static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *, int,
                                            volatile uint32_t **);
 
+static inline bool __walIsIndexHeaderChanged(wal_impl_v1_t *);
 static udb_code_t __walIndexReadHeader(wal_impl_v1_t *, bool *);
 static udb_code_t __walTryBeginRead(wal_impl_v1_t *, bool *, bool, int);
+static udb_code_t __walTryReadHeader(wal_impl_v1_t *, bool *);
+static volatile wal_index_header_t *__walIndexHeader(wal_impl_v1_t *);
+
+static volatile wal_checkpoint_t *__walCheckpoint(wal_impl_v1_t *);
 
 /* Static wal impl methods function forward implementations */
 
@@ -543,6 +548,11 @@ static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
   return rc;
 }
 
+static inline bool __walIsIndexHeaderChanged(wal_impl_v1_t *impl) {
+  return memcmp((void *)__walIndexHeader(impl), &impl->header,
+                sizeof(wal_index_header_t)) != 0;
+}
+
 /*
 ** Attempt to start a read transaction.  This might fail due to a race or
 ** other transient condition.  When that happens, it returns UDB_WAL_RETRY to
@@ -596,6 +606,11 @@ static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
 static udb_code_t __walTryBeginRead(wal_impl_v1_t *impl, bool *changed,
                                     bool useWal, int count) {
   udb_code_t rc = UDB_OK;
+  volatile wal_checkpoint_t *checkpoint = NULL;
+  uint32_t maxReadMark; /* Largest readMark[] value */
+  int maxIndex;         /* Index of largest readMark[] value */
+  wal_frame_t maxFrame; /* Wal frame to lock to */
+  int i;                /* Loop counter */
 
   /* Not currently locked */
   assert(impl->readLock < 0);
@@ -627,5 +642,114 @@ static udb_code_t __walTryBeginRead(wal_impl_v1_t *impl, bool *changed,
     }
     os_sleep(impl->os, delayMicroSec);
   }
+
+  if (!useWal) {
+    return __walTryReadHeader(impl, changed);
+  }
+
+  assert(impl->walIndexSize > 0);
+  assert(impl->walIndexData[0] != NULL);
+
+  checkpoint = __walCheckpoint(impl);
+  if (!useWal &&
+      AtomicLoad(&checkpoint->backfillFrame) == impl->header.maxFrame) {
+    /* The WAL has been completely backfilled (or it is empty).
+    ** and can be safely ignored.
+    */
+    if (__walIsIndexHeaderChanged(impl)) {
+      /* It is not safe to allow the reader to continue here if frames
+      ** may have been appended to the log before READ_LOCK(0) was obtained.
+      ** When holding READ_LOCK(0), the reader ignores the entire log file,
+      ** which implies that the database file contains a trustworthy
+      ** snapshot. Since holding READ_LOCK(0) prevents a checkpoint from
+      ** happening, this is usually correct.
+      **
+      ** However, if frames have been appended to the log (or if the log
+      ** is wrapped and written for that matter) before the READ_LOCK(0)
+      ** is obtained, that is not necessarily true. A checkpointer may
+      ** have started to backfill the appended frames but crashed before
+      ** it finished. Leaving a corrupt image in the database file.
+      */
+      return UDB_WAL_RETRY;
+    }
+    impl->readLock = 0;
+    return UDB_OK;
+  }
+
+  /* If we get this far, it means that the reader will want to use
+  ** the WAL to get at content from recent commits.  The job now is
+  ** to select one of the aReadMark[] entries that is closest to
+  ** but not exceeding pWal->hdr.mxFrame and lock that entry.
+  */
+  maxReadMark = 0;
+  maxIndex = 0;
+  maxFrame = impl->header.maxFrame;
+  for (i = 1; i < WAL_NREADER; i++) {
+    uint32_t thisMark = AtomicLoad(checkpoint->readMark + i);
+    if (maxReadMark <= thisMark && thisMark <= maxFrame) {
+      assert(thisMark != READMARK_NOT_USED);
+      maxReadMark = thisMark;
+      maxIndex = i;
+    }
+  }
+
+  if (maxReadMark < maxFrame || maxIndex == 0) {
+    for (i = 1; i < WAL_NREADER; i++) {
+      AtomicStore(checkpoint->readMark + i, maxFrame);
+      maxReadMark = maxFrame;
+      maxIndex = i;
+      break;
+    }
+  }
+  if (maxIndex == 0) {
+    assert(rc == UDB_BUSY);
+
+    return UDB_WAL_RETRY;
+  }
+
+  /* Now that the read-lock has been obtained, check that neither the
+  ** value in the aReadMark[] array or the contents of the wal-index
+  ** header have changed.
+  **
+  ** It is necessary to check that the wal-index header did not change
+  ** between the time it was read and when the shared-lock was obtained
+  ** on WAL_READ_LOCK(mxI) was obtained to account for the possibility
+  ** that the log file may have been wrapped by a writer, or that frames
+  ** that occur later in the log than pWal->hdr.mxFrame may have been
+  ** copied into the database by a checkpointer. If either of these things
+  ** happened, then reading the database with the current value of
+  ** pWal->hdr.mxFrame risks reading a corrupted snapshot. So, retry
+  ** instead.
+  **
+  ** Before checking that the live wal-index header has not changed
+  ** since it was read, set Wal.minFrame to the first frame in the wal
+  ** file that has not yet been checkpointed. This client will not need
+  ** to read any frames earlier than minFrame from the wal file - they
+  ** can be safely read directly from the database file.
+  **
+  ** Because a ShmBarrier() call is made between taking the copy of
+  ** nBackfill and checking that the wal-header in shared-memory still
+  ** matches the one cached in pWal->hdr, it is guaranteed that the
+  ** checkpointer that set nBackfill was not working with a wal-index
+  ** header newer than that cached in pWal->hdr. If it were, that could
+  ** cause a problem. The checkpointer could omit to checkpoint
+  ** a version of page X that lies before pWal->minFrame (call that version
+  ** A) on the basis that there is a newer version (version B) of the same
+  ** page later in the wal file. But if version B happens to like past
+  ** frame pWal->hdr.mxFrame - then the client would incorrectly assume
+  ** that it can read version A from the database file. However, since
+  ** we can guarantee that the checkpointer that set nBackfill could not
+  ** see any pages past pWal->hdr.mxFrame, this problem does not come up.
+  */
+  impl->minFrame = AtomicLoad(&checkpoint->backfillFrame) + 1;
+
+  if (AtomicLoad(&checkpoint->readMark + maxIndex) != maxReadMark ||
+      __walIsIndexHeaderChanged(impl)) {
+    return UDB_WAL_RETRY;
+  } else {
+    assert(maxReadMark <= impl->header.maxFrame);
+    impl->readLock = (int16_t)maxIndex;
+  }
+
   return rc;
 }
