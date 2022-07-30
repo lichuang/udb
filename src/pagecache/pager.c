@@ -73,7 +73,7 @@ udb_code_t pager_open(udb_t *udb, pager_t **pager) {
 
 open_pager_error:
   if (db_file != NULL) {
-    udb_file_close(db_file);
+    file_close(db_file);
   }
   if (wal != NULL) {
     wal_close(wal);
@@ -176,7 +176,7 @@ static udb_code_t read_db_page(page_t *page) {
   } else {
     /* Read the page from database file */
     offset = from_page_id_to_offset(pager, id);
-    err = udb_file_read(db, page->data, pager->pageSize, offset);
+    err = fileRead(db, page->data, pager->pageSize, offset);
   }
 
   if (err != UDB_OK) {

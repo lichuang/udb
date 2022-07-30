@@ -19,6 +19,7 @@ typedef enum udb_code_t {
   UDB_CORRUPT = -4,   /* The database disk image is malformed */
   UDB_WAL_RETRY = -5, /* read wal returns when it needs to be retried. */
   UDB_PROTOCOL = -6,  /* Database lock protocol error */
+  UDB_CANTOPEN = -7,  /* Unable to open the database file */
 } udb_code_t;
 
 #endif /* _UDB_H_ */

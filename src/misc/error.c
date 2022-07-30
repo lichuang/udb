@@ -14,3 +14,7 @@ udb_code_t err_corrupt(int lineno) {
 int error_misuse(int lineno) {
   return error_report(UDB_MISUSE, lineno, "misuse");
 }
+
+udb_code_t error_cantopen(int lineno) {
+  return error_report(UDB_CANTOPEN, lineno, "cannot open file");
+}

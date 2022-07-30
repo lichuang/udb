@@ -14,10 +14,12 @@ enum udb_open_file_flags_t {
   UDB_OPEN_CREATE = 0x4,
 };
 
-#define udb_file_is_open(file)
+#define file_is_open(file)
 
-udb_code_t udb_file_close(file_t *);
+udb_code_t file_close(file_t *);
 
-udb_code_t udb_file_read(file_t *, void *, uint32_t, offset_t);
+udb_code_t fileRead(file_t *, void *, uint32_t, offset_t);
+
+udb_code_t fileSize(file_t *, int64_t *);
 
 #endif /* _UDB_FILE_H_ */
