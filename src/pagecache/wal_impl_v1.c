@@ -5,6 +5,7 @@
 #include "misc/atomic.h"
 #include "misc/codec.h"
 #include "misc/error.h"
+#include "misc/test.h"
 #include "os/file.h"
 #include "os/os.h"
 #include "wal.h"
@@ -368,7 +369,7 @@ struct wal_checkpoint_t {
   uint32_t backfillFrame;         /* Number of WAL frames backfilled into DB */
   uint32_t readMark[WAL_NREADER]; /* Reader marks */
   uint8_t lock[SQLITE_SHM_NLOCK]; /* Reserved space for locks */
-  uint32_t backfillAttempted;     /* WAL frames perhaps written, or maybe not */
+  wal_frame_t backfillAttempted;  /* WAL frames perhaps written, or maybe not */
   uint32_t notUsed0;              /* Available for future enhancements */
 };
 #define READMARK_NOT_USED 0xffffffff
@@ -509,6 +510,8 @@ static udb_code_t __walIndexReadHeader(wal_impl_v1_t *, bool *);
 static udb_code_t __walTryBeginRead(wal_impl_v1_t *, bool *, bool, int);
 static udb_code_t __walTryReadHeader(wal_impl_v1_t *, bool *);
 static volatile wal_index_header_t *__walIndexHeader(wal_impl_v1_t *);
+static udb_code_t __walIndexAppend(wal_impl_v1_t *, wal_frame_t, page_no_t);
+static void __walIndexWriteHeader(wal_impl_v1_t *);
 
 static volatile wal_checkpoint_t *__walCheckpoint(wal_impl_v1_t *);
 
@@ -825,6 +828,7 @@ static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
 static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
   udb_code_t rc;
   int64_t fileSize;
+  uint32_t frameCksum[2] = {0, 0};
 
   assert(WAL_ALL_BUT_WRITE == WAL_WRITE_LOCK + 1);
   assert(WAL_CKPT_LOCK == WAL_ALL_BUT_WRITE);
@@ -906,13 +910,13 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
        pageIndex++) {
     uint32_t *share;
     wal_frame_t frame; /* Index of last frame read */
-    uint32_t iLast =
+    wal_frame_t last =
         MIN(lastFrame, HASHTABLE_NPAGE_ONE + pageIndex * HASHTABLE_NPAGE);
     wal_frame_t firstFrame =
         1 + (pageIndex == 0
                  ? 0
                  : HASHTABLE_NPAGE_ONE + (pageIndex - 1) * HASHTABLE_NPAGE);
-    uint32_t nHdr, nHdr32;
+    uint32_t headerSize, headerSize32;
 
     rc = __walIndexPage(impl, pageIndex, (volatile uint32_t **)&share);
     if (rc != UDB_OK) {
@@ -920,7 +924,7 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
     }
     impl->walIndexData[pageIndex] = private;
 
-    for (frame = firstFrame; frame <= lastFrame; frame++) {
+    for (frame = firstFrame; frame <= last; frame++) {
       int64_t offset = walFrameOffset(frame, pageSize);
       page_no_t pageNo;      /* Database page number for frame */
       uint32_t truncateSize; /* dbsize field from frame header */
@@ -934,12 +938,64 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
       if (!isValid) {
         break;
       }
+      rc = __walIndexAppend(impl, frame, pageNo);
+      if (rc != UDB_OK) {
+        break;
+      }
+
+      /* If truncateSize is non-zero, this is a commit record. */
+      if (truncateSize != 0) {
+        impl->header.maxFrame = frame;
+        impl->header.pageNum = truncateSize;
+        impl->header.pageSize = (int)((pageSize & 0xff00) | (pageSize >> 16));
+        testcase(pageSize <= 32768);
+        testcase(pageSize >= 65536);
+        frameCksum[0] = impl->header.frameCksum[0];
+        frameCksum[1] = impl->header.frameCksum[1];
+      }
     }
+    impl->walIndexData[pageIndex] = share;
+    headerSize = (pageIndex == 0 ? WAL_INDEX_HEADER_SIZE : 0);
+    headerSize32 = headerSize / sizeof(uint32_t);
+    memcpy(&share[headerSize32], &private[headerSize32],
+           WAL_INDEX_PAGE_SIZE - headerSize);
   }
+  memory_free(frame);
 
 finished:
   if (rc != UDB_OK) {
+    wal_checkpoint_t *checkpoint;
+    int i;
+
+    impl->header.frameCksum[0] = frameCksum[0];
+    impl->header.frameCksum[1] = frameCksum[1];
+    __walIndexWriteHeader(impl);
+
+    /* Reset the checkpoint-header. This is safe because this thread is
+     ** currently holding locks that exclude all other writers and
+     ** checkpointers. Then set the values of read-mark slots 1 through N.
+     */
+    checkpoint = __walCheckpoint(impl);
+    checkpoint->backfillFrame = 0;
+    checkpoint->backfillAttempted = impl->header.maxFrame;
+    checkpoint->readMark[0] = 0;
+    for (i = 1; i < WAL_NREADER; i++) {
+      if (i == 1 && impl->header.maxFrame != 0) {
+        checkpoint->readMark[i] = impl->header.maxFrame;
+      } else {
+        checkpoint->readMark[i] = READMARK_NOT_USED;
+      }
+    }
+
+    /* If more than one frame was recovered from the log file, report an
+     ** event via sqlite3_log(). This is to help with identifying performance
+     ** problems caused by applications routinely shutting down without
+     ** checkpointing the log file.
+     */
+    if (impl->header.pageNum > 0) {
+    }
   }
+
 recovery_error:
 
   return rc;
