@@ -266,17 +266,11 @@ typedef struct wal_hash_location_t wal_hash_location_t;
 
 #define SQLITE_SHM_NLOCK 8
 
-// 写锁在所有锁中的偏移量
 #define WAL_WRITE_LOCK 0
-// 除了写锁以外的其他所有锁
 #define WAL_ALL_BUT_WRITE 1
-// checkpoint锁在所有锁中的偏移量
 #define WAL_CKPT_LOCK 1
-// 恢复锁在所有锁中的偏移量
 #define WAL_RECOVER_LOCK 2
-// 输入读锁索引，返回对应读锁在所有锁中的偏移量，因为读锁从3开始，所以+3
 #define WAL_READ_LOCK(I) (3 + (I))
-// 读索引的数量 = 所有锁数量 - 读锁起始位置3
 #define WAL_NREADER (SQLITE_SHM_NLOCK - 3)
 
 /*
@@ -403,6 +397,9 @@ struct wal_checkpoint_t {
 */
 #define WAL_MAGIC 0x377f0682
 
+#define IS_VALID_WAL_MAGIC(magic) (((magic)&0xFFFFFFFE) == WAL_MAGIC)
+#define IS_BIGEND_CHECKSUM(magic) ((magic)&0x00000001)
+
 /*
 ** Define the parameters of the hash tables in the wal-index file. There
 ** is a hash-table following every HASHTABLE_NPAGE page numbers in the
@@ -432,7 +429,7 @@ struct wal_checkpoint_t {
 ** assuming a database page size of pageSize bytes. The offset returned
 ** is to the start of the write-ahead log frame-header.
 */
-#define walFrameOffset(frame, pageSize)                                        \
+#define __walFrameOffset(frame, pageSize)                                      \
   (WAL_HEADER_SIZE +                                                           \
    ((frame)-1) * (int64_t)((pageSize) + WAL_FRAME_HEADER_SIZE))
 
@@ -479,11 +476,22 @@ typedef struct wal_impl_v1_t {
   uint8_t readOnly;           /* WAL_RDWR, WAL_RDONLY */
   wal_index_header_t header;  /* Wal-index header for current transaction */
   wal_frame_t minFrame;       /* Ignore wal frames before this one */
+  const char *walName;        /* Name of WAL file */
   uint32_t checkpointCounter; /* Checkpoint counter in the wal-header */
 #ifdef UDB_DEBUG
   bool lockError; /* True if a locking error has occurred */
 #endif
 } wal_impl_v1_t;
+
+/* WAL Header layout offset */
+typedef enum wal_header_layout_offset_t {
+  WAL_HEADER_MAGIC_OFFSET = 0,               /* Offset of Magic Number */
+  WAL_HEADER_PAGESIZE_OFFSET = 8,            /* Offset of page size */
+  WAL_HEADER_CHECKPOINT_COUNTER_OFFSET = 12, /* Offset of checkpoint counter */
+  WAL_HEADER_SALT_OFFSET = 16,               /* Offset of salt */
+  WAL_HEADER_FRAME_CKSUM1_OFFSET = 24,       /* Offset of frame checksum 1 */
+  WAL_HEADER_FRAME_CKSUM2_OFFSET = 28,       /* Offset of frame checksum 2 */
+} wal_header_layout_offset_t;
 
 /* Static wal impl methods function forward declarations */
 udb_code_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
@@ -595,7 +603,7 @@ udb_code_t __ReadFrame_impl_v1(wal_impl_t *arg, wal_frame_t readFrame,
 
   size = impl->header.pageSize;
   size = (size & 0xfe00) + ((size & 0x0001) << 16);
-  offset = walFrameOffset(readFrame, size) + WAL_FRAME_HEADER_SIZE;
+  offset = __walFrameOffset(readFrame, size) + WAL_FRAME_HEADER_SIZE;
 
   return osRead(impl->walFile, buffer, (bufferSize > size ? size : bufferSize),
                 offset);
@@ -604,7 +612,7 @@ udb_code_t __ReadFrame_impl_v1(wal_impl_t *arg, wal_frame_t readFrame,
 udb_code_t __BeginReadTransaction_impl_v1(wal_impl_t *arg, bool *changed) {
   udb_code_t rc;
   int count = 0; /* Number of __walTryBeginRead attempts */
-  bool retr wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+  wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
 
   assert(!impl->checkpointLock);
 
@@ -827,22 +835,24 @@ static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
 */
 static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
   udb_code_t rc;
-  int64_t fileSize;
+  int64_t logFileSize;
   uint32_t frameCksum[2] = {0, 0};
 
   assert(WAL_ALL_BUT_WRITE == WAL_WRITE_LOCK + 1);
   assert(WAL_CKPT_LOCK == WAL_ALL_BUT_WRITE);
   assert(impl->writeLock);
 
+  logInfo("WAL impl v1 %p: recovery begin...\n", impl);
+
   memset(&impl->header, 0, sizeof(wal_index_header_t));
 
-  rc = fileSize(impl->walFile, &fileSize);
+  rc = fileSize(impl->walFile, &logFileSize);
   if (rc != UDB_OK) {
     goto recovery_error;
   }
 
-  if (fileSize <= WAL_HEADER_SIZE) {
-    goto recovery_error;
+  if (logFileSize <= WAL_HEADER_SIZE) {
+    goto finished;
   }
 
   uint8_t buf[WAL_HEADER_SIZE]; /* Buffer to load WAL header into */
@@ -857,6 +867,7 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
   int pageIndex;                /* Current 32KB wal-index page */
   wal_frame_t *lastFrame;       /* Last frame in wal, based on nSize alone */
 
+  /* Read the WAL header. */
   rc = fileRead(impl->walFile, buf, WAL_HEADER_SIZE, 0);
   if (rc != UDB_OK) {
     goto recovery_error;
@@ -865,25 +876,28 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
   /*
    ** The first 16 bytes of WAL header is magic and page size.
    */
-  magic = get4Byte(&buf[0]);
-  pageSize = get4Byte(&buf[8]);
-  /*If the 'magic' value or the page suze is invalid, ignore the whole
+  magic = get4Byte(&buf[WAL_HEADER_MAGIC_OFFSET]);
+  pageSize = get4Byte(&buf[WAL_HEADER_PAGESIZE_OFFSET]);
+  /* If the 'magic' value or the page size is invalid, ignore the whole
    ** WAL file.
    */
-  if ((magic & 0xFFFFFFFE) != WAL_MAGIC || !VALID_PAGE_SIZE(pageSize)) {
+  if (!IS_VALID_WAL_MAGIC(magic) || !VALID_PAGE_SIZE(pageSize)) {
     goto finished;
   }
 
-  impl->header.bigEndCksum = (uint8_t)(magic & 0x00000001);
+  impl->header.bigEndCksum = IS_BIGEND_CHECKSUM(magic);
   impl->pageSize = pageSize;
-  impl->checkpointCounter = get4Byte(&buf[12]);
-  memcpy(&impl->header.salt, &buf[16], 8);
+  impl->checkpointCounter =
+      get4Byte(&buf[WAL_HEADER_CHECKPOINT_COUNTER_OFFSET]);
+  memcpy(&impl->header.salt, &buf[WAL_HEADER_SALT_OFFSET], 8);
 
   /* Verify that the WAL header checksum is correct */
   __walChecksumBytes(impl->header.bigEndCksum == UDB_BIGENDIAN, buf,
                      WAL_HEADER_SIZE - 2 * 4, 0, impl->header.frameCksum);
-  if (impl->header.frameCksum[0] != get4Byte(&buf[24]) ||
-      impl->header.frameCksum[1] != get4Byte(&buf[28])) {
+  if (impl->header.frameCksum[0] !=
+          get4Byte(&buf[WAL_HEADER_FRAME_CKSUM1_OFFSET]) ||
+      impl->header.frameCksum[1] !=
+          get4Byte(&buf[WAL_HEADER_FRAME_CKSUM2_OFFSET])) {
     goto finished;
   }
 
@@ -905,11 +919,11 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
   private = (uint32_t *)&data[pageSize];
 
   /* Read all frames from the log file. */
-  lastFrame = (fileSize - WAL_HEADER_SIZE) / frameSize;
+  lastFrame = (logFileSize - WAL_HEADER_SIZE) / frameSize;
   for (pageIndex = 0; pageIndex <= __walFrameHashIndex(lastFrame);
        pageIndex++) {
     uint32_t *share;
-    wal_frame_t frame; /* Index of last frame read */
+    wal_frame_t frameIdx; /* Index of last frame read */
     wal_frame_t last =
         MIN(lastFrame, HASHTABLE_NPAGE_ONE + pageIndex * HASHTABLE_NPAGE);
     wal_frame_t firstFrame =
@@ -924,13 +938,13 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
     }
     impl->walIndexData[pageIndex] = private;
 
-    for (frame = firstFrame; frame <= last; frame++) {
-      int64_t offset = walFrameOffset(frame, pageSize);
+    for (frameIdx = firstFrame; frameIdx <= last; frameIdx++) {
+      int64_t offset = __walFrameOffset(frameIdx, pageSize);
       page_no_t pageNo;      /* Database page number for frame */
       uint32_t truncateSize; /* dbsize field from frame header */
 
       /* Read and decode the next log frame. */
-      rc = osRead(impl->walFile, frame, frameSize, offset);
+      rc = fileRead(impl->walFile, frame, frameSize, offset);
       if (rc != UDB_OK) {
         break;
       }
@@ -938,14 +952,14 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
       if (!isValid) {
         break;
       }
-      rc = __walIndexAppend(impl, frame, pageNo);
+      rc = __walIndexAppend(impl, frameIdx, pageNo);
       if (rc != UDB_OK) {
         break;
       }
 
       /* If truncateSize is non-zero, this is a commit record. */
       if (truncateSize != 0) {
-        impl->header.maxFrame = frame;
+        impl->header.maxFrame = frameIdx;
         impl->header.pageNum = truncateSize;
         impl->header.pageSize = (int)((pageSize & 0xff00) | (pageSize >> 16));
         testcase(pageSize <= 32768);
@@ -955,7 +969,7 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
       }
     }
     impl->walIndexData[pageIndex] = share;
-    headerSize = (pageIndex == 0 ? WAL_INDEX_HEADER_SIZE : 0);
+    headerSize = pageIndex == 0 ? WALINDEX_HEADER_SIZE : 0;
     headerSize32 = headerSize / sizeof(uint32_t);
     memcpy(&share[headerSize32], &private[headerSize32],
            WAL_INDEX_PAGE_SIZE - headerSize);
@@ -993,11 +1007,14 @@ finished:
      ** checkpointing the log file.
      */
     if (impl->header.pageNum > 0) {
+      logInfo("recovered %d frames from WAL file %s", impl->header.maxFrame,
+              impl->walName);
     }
   }
 
 recovery_error:
-
+  logInfo("WAL impl v1 %p: recovery %s\n", impl,
+          rc != UDB_OK ? "failed" : "ok");
   return rc;
 }
 
