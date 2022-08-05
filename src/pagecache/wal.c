@@ -32,7 +32,7 @@ udb_code_t wal_close(wal_t *wal) {
 ** Pager layer will use this to know that its cache is stale and
 ** needs to be flushed.
 */
-udb_code_t wal_begin_read_transaction(wal_t *wal, bool *changed) {
+udb_code_t walBeginReadTransaction(wal_t *wal, bool *changed) {
   return wal->methods.BeginReadTransaction(wal->impl, changed);
 }
 

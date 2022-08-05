@@ -14,6 +14,6 @@ struct os_t {
 
 udb_code_t os_open(os_t *, const char *path, file_t *file, int flags);
 
-udb_code_t os_sleep(os_t *, int microSeconds);
+udb_code_t osSleep(os_t *, int microSeconds);
 
 #endif /* _UDB_OS_H_ */

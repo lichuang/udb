@@ -40,7 +40,8 @@ udb_code_t wal_close(wal_t *);
 ** write to or checkpoint the WAL.  sqlite3WalCloseSnapshot() closes the
 ** transaction and releases the lock.
 */
-udb_code_t wal_begin_read_transaction(wal_t *, bool *);
+udb_code_t walBeginReadTransaction(wal_t *, bool *);
+udb_code_t walEndReadTransaction(wal_t *);
 
 udb_code_t wal_find_frame(wal_t *, page_no_t, wal_frame_t *);
 udb_code_t wal_read_frame(wal_t *, wal_frame_t, uint32_t, void *);

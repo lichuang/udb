@@ -484,27 +484,28 @@ typedef struct wal_impl_v1_t {
 } wal_impl_v1_t;
 
 /* WAL Header layout offset */
-typedef enum wal_header_layout_offset_t {
+enum wal_header_layout_offset_t {
   WAL_HEADER_MAGIC_OFFSET = 0,               /* Offset of Magic Number */
   WAL_HEADER_PAGESIZE_OFFSET = 8,            /* Offset of page size */
   WAL_HEADER_CHECKPOINT_COUNTER_OFFSET = 12, /* Offset of checkpoint counter */
   WAL_HEADER_SALT_OFFSET = 16,               /* Offset of salt */
   WAL_HEADER_FRAME_CKSUM1_OFFSET = 24,       /* Offset of frame checksum 1 */
   WAL_HEADER_FRAME_CKSUM2_OFFSET = 28,       /* Offset of frame checksum 2 */
-} wal_header_layout_offset_t;
+};
 
 /* Static wal impl methods function forward declarations */
 udb_code_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
 udb_code_t __ReadFrame_impl_v1(wal_impl_t *, wal_frame_t, uint32_t bufferSize,
                                void *buffer);
 udb_code_t __BeginReadTransaction_impl_v1(wal_impl_t *, bool *);
+udb_code_t __EndReadTransaction_impl_v1(wal_impl_t *);
 void __Destroy_v1(wal_impl_t *);
 
 /* Static internal function forward declarations */
 static void __initWalImplV1(wal_t *, wal_impl_v1_t *);
 static int __walFrameHashIndex(wal_frame_t frame);
 static udb_code_t __wal_hash_get(wal_impl_v1_t *, int, wal_hash_location_t *);
-static int __wal_hash_index(page_no_t no);
+static int __walHashIndex(page_no_t no);
 static int __wal_next_hash(int);
 static inline udb_code_t __walIndexPage(wal_impl_v1_t *, int,
                                         volatile uint32_t **);
@@ -512,12 +513,12 @@ static inline udb_code_t __walIndexPage(wal_impl_v1_t *, int,
 static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *, int,
                                            volatile uint32_t **);
 static udb_code_t __walIndexRecover(wal_impl_v1_t *);
+static void __walCleanupHash(wal_impl_v1_t *);
 
 static inline bool __walIsIndexHeaderChanged(wal_impl_v1_t *);
-static udb_code_t __walIndexReadHeader(wal_impl_v1_t *, bool *);
 static udb_code_t __walTryBeginRead(wal_impl_v1_t *, bool *, bool, int);
 static udb_code_t __walTryReadHeader(wal_impl_v1_t *, bool *);
-static volatile wal_index_header_t *__walIndexHeader(wal_impl_v1_t *);
+static inline wal_index_header_t *__walIndexHeader(wal_impl_v1_t *);
 static udb_code_t __walIndexAppend(wal_impl_v1_t *, wal_frame_t, page_no_t);
 static void __walIndexWriteHeader(wal_impl_v1_t *);
 
@@ -572,7 +573,7 @@ udb_code_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
     }
 
     collideNum = HASHTABLE_NSLOT;
-    key = __wal_hash_index(no);
+    key = __walHashIndex(no);
     while ((hashSlot = AtomicLoad(&location.hash[key])) != 0) {
       wal_frame_t frame = hashSlot + location.zeroFrame;
       if (frame <= lastFrame && frame >= impl->minFrame &&
@@ -760,7 +761,7 @@ static udb_code_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
 ** The __wal_next_hash() function advances the hash to the next value
 ** in the event of a collision.
 */
-static int __wal_hash_index(page_no_t no) {
+static int __walHashIndex(page_no_t no) {
   assert(no > 0);
   assert((HASHTABLE_NSLOT & (HASHTABLE_NSLOT - 1)) == 0);
   return (no * HASHTABLE_HASH_1) & (HASHTABLE_NSLOT - 1);
@@ -1095,8 +1096,8 @@ static udb_code_t __walTryBeginRead(wal_impl_v1_t *impl, bool *changed,
   ** during the few nanoseconds that it is holding the lock.  In that case,
   ** it might take longer than normal for the lock to free.
   **
-  ** After 5 RETRYs, we begin calling os_sleep().  The first few
-  ** calls to os_sleep() have a delay of 1 microsecond.  Really this
+  ** After 5 RETRYs, we begin calling osSleep().  The first few
+  ** calls to osSleep() have a delay of 1 microsecond.  Really this
   ** is more of a scheduler yield than an actual delay.  But on the 10th
   ** an subsequent retries, the delays start becoming longer and longer,
   ** so that on the 100th (and last) RETRY we delay for 323 milliseconds.
@@ -1110,7 +1111,7 @@ static udb_code_t __walTryBeginRead(wal_impl_v1_t *impl, bool *changed,
     if (count >= 10) {
       delayMicroSec = (count - 9) * (count - 9) * 39;
     }
-    os_sleep(impl->os, delayMicroSec);
+    osSleep(impl->os, delayMicroSec);
   }
 
   if (!useWal) {
@@ -1222,4 +1223,171 @@ static udb_code_t __walTryBeginRead(wal_impl_v1_t *impl, bool *changed,
   return rc;
 }
 
-static udb_code_t __walTryReadHeader(wal_impl_v1_t *impl, bool *changed) {}
+static udb_code_t __walTryReadHeader(wal_impl_v1_t *impl, bool *changed) {
+  int64_t walSize;              /* Size of wal file on disk in bytes */
+  int64_t offset;               /* Current offset when reading wal file */
+  uint8_t buf[WAL_HEADER_SIZE]; /* Buffer to load WAL header into */
+  uint8_t *frame = NULL;        /* Malloc'd buffer to load entire frame */
+  int frameSize;                /* Number of bytes in buffer frame[] */
+  uint8_t *data;                /* Pointer to data part of frame buffer */
+  udb_code_t rc;                /* Return code */
+  uint32_t saveCksum[2];        /* Saved copy of impl->header.frameCksum */
+
+  assert(impl->walIndexSize > 0 && impl->walIndexData[0] != NULL);
+
+  impl->readLock = 0;
+
+  /* We reach this point only if the real shared-memory is still unreliable.
+   ** Assume the in-memory WAL-index substitute is correct and load it
+   ** into pWal->hdr.
+   */
+  memcpy(&impl->header, (void *)__walIndexHeader(impl),
+         sizeof(wal_index_header_t));
+
+  /* Make sure some writer hasn't come in and changed the WAL file out
+  ** from under us, then disconnected, while we were not looking.
+  */
+  rc = fileSize(impl->walFile, &walSize);
+  if (rc != UDB_OK) {
+    goto out;
+  }
+
+  if (walSize < WAL_HEADER_SIZE) {
+    /* If the wal file is too small to contain a wal-header and the
+     ** wal-index header has maxFrame==0, then it must be safe to proceed
+     ** reading the database file only. However, the page cache cannot
+     ** be trusted, as a read/write connection may have connected, written
+     ** the db, run a checkpoint, truncated the wal file and disconnected
+     ** since this client's last read transaction.  */
+    *changed = true;
+    rc = impl->header.maxFrame == 0 ? UDB_OK : UDB_WAL_RETRY;
+    goto out;
+  }
+
+  /* Check the salt keys at the start of the wal file still match. */
+  rc = fileRead(impl->walFile, buf, WAL_HEADER_SIZE, 0);
+  if (rc != UDB_OK) {
+    goto out;
+  }
+  if (memcmp(&impl->header.salt, &buf[WAL_HEADER_SALT_OFFSET], 8) != 0) {
+    /* Some writer has wrapped the WAL file while we were not looking.
+     ** Return UDB_WAL_RETRY which will cause the in-memory WAL-index to be
+     ** rebuilt. */
+    rc = UDB_WAL_RETRY;
+    goto out;
+  }
+  /* Allocate a buffer to read frames into */
+  frameSize = impl->header.pageSize + WAL_FRAME_HEADER_SIZE;
+  frame = memory_alloc(frameSize);
+  if (frame == NULL) {
+    rc = UDB_OOM;
+    goto out;
+  }
+  data = &frame[WAL_FRAME_HEADER_SIZE];
+
+  /* Check to see if a complete transaction has been appended to the
+   ** wal file since the heap-memory wal-index was created. If so, the
+   ** heap-memory wal-index is discarded and WAL_RETRY returned to
+   ** the caller.  */
+  saveCksum[0] = impl->header.frameCksum[0];
+  saveCksum[1] = impl->header.frameCksum[1];
+
+  offset = __walFrameOffset(impl->header.maxFrame + 1, impl->header.pageSize);
+  for (; offset + frameSize <= walSize; offset += frameSize) {
+    page_no_t pageNo;      /* Database page number for frame */
+    uint32_t truncateSize; /* dbsize field from frame header */
+
+    /* Read and decode the next log frame. */
+    rc = fileRead(impl->walFile, frame, frameSize, offset);
+    if (rc != UDB_OK) {
+      break;
+    }
+    if (!__walDecodeFrame(impl, &pageNo, &truncateSize, data, frame)) {
+      break;
+    }
+
+    /* If truncateSize is non-zero, then a complete transaction has been
+     ** appended to this wal file. Set rc to UDB_WAL_RETRY and break out of
+     ** the loop.  */
+    if (truncateSize != 0) {
+      rc = UDB_WAL_RETRY;
+      break;
+    }
+  }
+  impl->header.frameCksum[0] = saveCksum[0];
+  impl->header.frameCksum[1] = saveCksum[1];
+
+out:
+  memory_free(frame);
+  if (rc != UDB_OK) {
+    int i;
+    for (i = 0; i < impl->walIndexSize; i++) {
+      memory_free(impl->walIndexData[i]);
+      impl->walIndexData[i] = NULL;
+    }
+    __EndReadTransaction_impl_v1(impl);
+    *changed = true;
+  }
+
+  return rc;
+}
+
+static inline wal_index_header_t *__walIndexHeader(wal_impl_v1_t *impl) {
+  assert(impl->walIndexSize > 0 && impl->walIndexData[0] != NULL);
+  return (wal_index_header_t *)impl->walIndexData[0];
+}
+
+/*
+** Set an entry in the wal-index that will map database page number
+** pPage into WAL frame iFrame.
+*/
+static udb_code_t __walIndexAppend(wal_impl_v1_t *impl, wal_frame_t frame,
+                                   page_no_t pageNo) {
+  udb_code_t rc;
+  wal_hash_location_t location;
+
+  rc = __wal_hash_get(impl, __walFrameHashIndex(frame), &location);
+  if (rc != UDB_OK) {
+    return rc;
+  }
+
+  int key;
+  int index;
+  int collide;
+
+  index = frame - location.zeroFrame;
+  assert(index <= HASHTABLE_NSLOT / 2 + 1);
+
+  /* If this is the first entry to be added to this hash-table, zero the
+   ** entire hash table and aPgno[] array before proceeding.
+   */
+  if (index == 1) {
+    int byte = (int)((uint8_t *)&location.hash[HASHTABLE_NSLOT] -
+                     (uint8_t *)&location.pageNo[1]);
+    memset((void *)&location.pageNo[1], 0, byte);
+  }
+
+  /* If the entry in aPgno[] is already set, then the previous writer
+  ** must have exited unexpectedly in the middle of a transaction (after
+  ** writing one or more dirty pages to the WAL to free up memory).
+  ** Remove the remnants of that writers uncommitted transaction from
+  ** the hash-table before writing any new entries.
+  */
+  if (location.pageNo[index]) {
+    __walCleanupHash(impl);
+    assert(!location.pageNo[index]);
+  }
+
+  /* Write the aPgno[] array entry and the hash-table slot. */
+  collide = index;
+  for (key = __walHashIndex(pageNo); location.hash[key];
+       key = __wal_next_hash(key)) {
+    if ((collide--) == 0) {
+      return UDB_CORRUPT_BKPT;
+    }
+  }
+  location.pageNo[index] = pageNo;
+  AtomicStore(&location.hash[key], (hash_slot_t)index);
+
+  return rc;
+}
