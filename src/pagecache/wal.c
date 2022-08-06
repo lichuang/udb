@@ -7,13 +7,13 @@
 
 extern udb_code_t wal_open_impl_v1(wal_config_t *, wal_t **);
 
-udb_code_t wal_open(wal_config_t *config, wal_t **wal) {
+udb_code_t walOpen(wal_config_t *config, wal_t **wal) {
   assert(config->version == 1);
 
   return wal_open_impl_v1(config, wal);
 }
 
-udb_code_t wal_close(wal_t *wal) {
+udb_code_t walClose(wal_t *wal) {
   wal->methods.Destroy(wal->impl);
   memory_free(wal);
 }

@@ -30,8 +30,8 @@ struct wal_t {
 #define IS_VALID_WAL_FRAME(frame) (frame > 0)
 
 /* Open and close a connection to a write-ahead log. */
-udb_code_t wal_open(wal_config_t *, wal_t **);
-udb_code_t wal_close(wal_t *);
+udb_code_t walOpen(wal_config_t *, wal_t **);
+udb_code_t walClose(wal_t *);
 
 /* Used by readers to open (lock) and close (unlock) a snapshot.  A
 ** snapshot is like a read-transaction.  It is the state of the database

@@ -12,7 +12,7 @@ struct os_t {
   int sizeOfFile; /* Size of subclassed file_t */
 };
 
-udb_code_t os_open(os_t *, const char *path, file_t *file, int flags);
+udb_code_t osOpen(os_t *, const char *path, file_t *file, int flags);
 
 udb_code_t osSleep(os_t *, int microSeconds);
 

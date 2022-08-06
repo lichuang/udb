@@ -259,7 +259,7 @@ typedef struct wal_hash_location_t wal_hash_location_t;
 ** interoperate.  The standard implemention used on both unix and windows
 ** is for the index number to indicate a byte offset into the
 ** WalCkptInfo.aLock[] array in the wal-index header.  In other words, all
-** locks are on the shm file.  The WALINDEX_LOCK_OFFSET constant (which
+** locks are on the shm file.  The WAL_INDEX_LOCK_OFFSET constant (which
 ** should be 120) is the location in the shm file for the first locking
 ** byte.
 */
@@ -369,13 +369,13 @@ struct wal_checkpoint_t {
 #define READMARK_NOT_USED 0xffffffff
 
 /* A block of WALINDEX_LOCK_RESERVED bytes beginning at
-** WALINDEX_LOCK_OFFSET is reserved for locks. Since some systems
+** WAL_INDEX_LOCK_OFFSET is reserved for locks. Since some systems
 ** only support mandatory file-locks, we do not read or write data
 ** from the region of the file on which locks are applied.
 */
-#define WALINDEX_LOCK_OFFSET                                                   \
+#define WAL_INDEX_LOCK_OFFSET                                                  \
   (sizeof(wal_index_header_t) * 2 + offsetof(wal_checkpoint_t, lock))
-#define WALINDEX_HEADER_SIZE                                                   \
+#define WAL_INDEX_HEADER_SIZE                                                  \
   (sizeof(wal_index_header_t) * 2 + sizeof(wal_checkpoint_t))
 
 /* Size of header before each frame in wal */
@@ -418,7 +418,7 @@ struct wal_checkpoint_t {
 ** hash-table on each aligned 32KB page of the wal-index.
 */
 #define HASHTABLE_NPAGE_ONE                                                    \
-  (HASHTABLE_NPAGE - (WALINDEX_HEADER_SIZE / sizeof(uint32_t)))
+  (HASHTABLE_NPAGE - (WAL_INDEX_HEADER_SIZE / sizeof(uint32_t)))
 
 /* The wal-index is divided into pages of WAL_INDEX_PAGE_SIZE bytes each. */
 #define WAL_INDEX_PAGE_SIZE                                                    \
@@ -450,7 +450,7 @@ typedef uint16_t hash_slot_t;
 /*
 ** An instance of the wal_hash_location_t object is used to describe the
 ** location of a page hash table in the wal-index.
-** This becomes the return *value from __wal_hash_get().
+** This becomes the return *value from __walHashGet().
 */
 struct wal_hash_location_t {
   volatile hash_slot_t *hash; /* Start of the wal-index hash table */
@@ -493,6 +493,17 @@ enum wal_header_layout_offset_t {
   WAL_HEADER_FRAME_CKSUM2_OFFSET = 28,       /* Offset of frame checksum 2 */
 };
 
+/*
+** The argument to this macro must be of type u32. On a little-endian
+** architecture, it returns the u32 value that results from interpreting
+** the 4 bytes as a big-endian value. On a big-endian architecture, it
+** returns the value that would be produced by interpreting the 4 bytes
+** of the input value as a little-endian integer.
+*/
+#define BYTESWAP32(x)                                                          \
+  ((((x)&0x000000FF) << 24) + (((x)&0x0000FF00) << 8) +                        \
+   (((x)&0x00FF0000) >> 8) + (((x)&0xFF000000) >> 24))
+
 /* Static wal impl methods function forward declarations */
 udb_code_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
 udb_code_t __ReadFrame_impl_v1(wal_impl_t *, wal_frame_t, uint32_t bufferSize,
@@ -504,14 +515,14 @@ void __Destroy_v1(wal_impl_t *);
 /* Static internal function forward declarations */
 static void __initWalImplV1(wal_t *, wal_impl_v1_t *);
 static int __walFrameHashIndex(wal_frame_t frame);
-static udb_code_t __wal_hash_get(wal_impl_v1_t *, int, wal_hash_location_t *);
+static udb_code_t __walHashGet(wal_impl_v1_t *, int, wal_hash_location_t *);
 static int __walHashIndex(page_no_t no);
 static int __wal_next_hash(int);
 static inline udb_code_t __walIndexPage(wal_impl_v1_t *, int,
                                         volatile uint32_t **);
 
-static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *, int,
-                                           volatile uint32_t **);
+static udb_code_t __walIndexPageRealloc(wal_impl_v1_t *, int,
+                                        volatile uint32_t **);
 static udb_code_t __walIndexRecover(wal_impl_v1_t *);
 static void __walCleanupHash(wal_impl_v1_t *);
 
@@ -524,7 +535,7 @@ static void __walIndexWriteHeader(wal_impl_v1_t *);
 
 static volatile wal_checkpoint_t *__walCheckpoint(wal_impl_v1_t *);
 
-static void __walChecksumBytes(int, uint8_t *, int, const uint32_t *,
+static void __walChecksumBytes(bool, uint8_t *, int, const uint32_t *,
                                uint32_t *);
 static bool __walDecodeFrame(wal_impl_v1_t *, page_no_t *, uint32_t *,
                              uint8_t *, uint8_t *);
@@ -567,7 +578,7 @@ udb_code_t __FindFrame_impl_v1(wal_impl_t *arg, page_no_t no,
     udb_code_t rc;                /* Error code */
     hash_slot_t hashSlot;
 
-    rc = __wal_hash_get(impl, hash, &location);
+    rc = __walHashGet(impl, hash, &location);
     if (rc != UDB_OK) {
       return rc;
     }
@@ -659,26 +670,37 @@ udb_code_t wal_open_impl_v1(wal_config_t *config, wal_t **wal) {
   assert(walName != NULL && walName[0] != '\0');
   assert(config->dbFile != NULL);
 
+  assert(120 == WAL_INDEX_LOCK_OFFSET);
+  assert(136 == WAL_INDEX_HEADER_SIZE);
+
   *wal = NULL;
 
   retWal = (wal_t *)memory_calloc(sizeof(wal_t) + sizeof(wal_impl_v1_t) +
-                                  os->sizeOfFile);
+                                  os->sizeOfFile + strlen(walName));
   if (retWal == NULL) {
     return UDB_OOM;
   }
 
   impl = (wal_impl_v1_t *)&retWal[1];
   impl->walFile = (file_t *)&impl[1];
+  impl->walName = (char *)impl->walFile;
   __initWalImplV1(retWal, impl);
 
   impl->os = os;
   impl->walFile = (file_t *)&impl[1];
   impl->dbFile = config->dbFile;
   impl->maxWalSize = config->maxWalSize;
+  strcpy(impl->walName, walName);
 
   /* Open file handle on the write-ahead log file. */
   flags = (UDB_OPEN_READWRITE | UDB_OPEN_CREATE);
-  ret = os_open(os, walName, impl->walFile, flags);
+  ret = osOpen(os, walName, impl->walFile, flags);
+  if (ret != UDB_OK) {
+    memory_free(retWal);
+  }
+
+  /* Recover wal index from wal file. */
+  ret = __walIndexRecover(impl);
   if (ret != UDB_OK) {
     memory_free(retWal);
   }
@@ -731,8 +753,8 @@ static int __walFrameHashIndex(wal_frame_t frame) {
 ** of the first frame indexed by the hash table,
 ** frame (location->zeroFrame+1).
 */
-static udb_code_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
-                                 wal_hash_location_t *location) {
+static udb_code_t __walHashGet(wal_impl_v1_t *impl, int hash,
+                               wal_hash_location_t *location) {
   udb_code_t rc = UDB_OK;
 
   rc = __walIndexPage(impl, hash, &location->pageNo);
@@ -745,7 +767,7 @@ static udb_code_t __wal_hash_get(wal_impl_v1_t *impl, int hash,
   location->hash = (volatile hash_slot_t *)&location->pageNo[HASHTABLE_NPAGE];
   if (hash == 0) {
     location->pageNo =
-        &location->pageNo[WALINDEX_HEADER_SIZE / sizeof(uint32_t)];
+        &location->pageNo[WAL_INDEX_HEADER_SIZE / sizeof(uint32_t)];
     location->zeroFrame = 0;
   } else {
     location->zeroFrame = HASHTABLE_NPAGE_ONE + (hash - 1) * HASHTABLE_NPAGE;
@@ -774,7 +796,7 @@ static inline int __wal_next_hash(int priorHash) {
 static udb_code_t __walIndexPage(wal_impl_v1_t *impl, int hash,
                                  volatile uint32_t **pageNo) {
   if (impl->walIndexSize <= hash || (*pageNo = impl->walIndexData[hash]) == 0) {
-    return __wal_index_page_realloc(impl, hash, pageNo);
+    return __walIndexPageRealloc(impl, hash, pageNo);
   }
   return UDB_OK;
 }
@@ -793,8 +815,8 @@ static udb_code_t __walIndexPage(wal_impl_v1_t *impl, int hash,
 ** page and SQLITE_OK is returned. If an error (an OOM or VFS error) occurs,
 ** then an SQLite error code is returned and *ppPage is set to 0.
 */
-static udb_code_t __wal_index_page_realloc(wal_impl_v1_t *impl, int hash,
-                                           volatile uint32_t **pageNo) {
+static udb_code_t __walIndexPageRealloc(wal_impl_v1_t *impl, int hash,
+                                        volatile uint32_t **pageNo) {
   udb_code_t rc = UDB_OK;
 
   *pageNo = NULL;
@@ -970,7 +992,7 @@ static udb_code_t __walIndexRecover(wal_impl_v1_t *impl) {
       }
     }
     impl->walIndexData[pageIndex] = share;
-    headerSize = pageIndex == 0 ? WALINDEX_HEADER_SIZE : 0;
+    headerSize = pageIndex == 0 ? WAL_INDEX_HEADER_SIZE : 0;
     headerSize32 = headerSize / sizeof(uint32_t);
     memcpy(&share[headerSize32], &private[headerSize32],
            WAL_INDEX_PAGE_SIZE - headerSize);
@@ -1017,6 +1039,64 @@ recovery_error:
   logInfo("WAL impl v1 %p: recovery %s\n", impl,
           rc != UDB_OK ? "failed" : "ok");
   return rc;
+}
+
+/*
+** Remove entries from the hash table that point to WAL slots greater
+** than pWal->hdr.mxFrame.
+**
+** This function is called whenever pWal->hdr.mxFrame is decreased due
+** to a rollback or savepoint.
+**
+** At most only the hash table containing pWal->hdr.mxFrame needs to be
+** updated.  Any later hash tables will be automatically cleared when
+** pWal->hdr.mxFrame advances to the point where those hash tables are
+** actually needed.
+*/
+static void __walCleanupHash(wal_impl_v1_t *impl) {
+  wal_hash_location_t location;
+  int limit = 0;
+  int byte = 0;
+  int i;
+  int index;
+
+  assert(impl->writeLock != 0);
+  testcase(impl->header.maxFrame == HASHTABLE_NPAGE_ONE - 1);
+  testcase(impl->header.maxFrame == HASHTABLE_NPAGE_ONE);
+  testcase(impl->header.maxFrame == HASHTABLE_NPAGE_ONE + 1);
+
+  if (impl->header.maxFrame == 0) {
+    return;
+  }
+
+  /* Obtain pointers to the hash-table and page-number array containing
+   ** the entry that corresponds to frame pWal->hdr.mxFrame. It is guaranteed
+   ** that the page said hash-table and array reside on is already mapped.(1)
+   */
+  index = __walFrameHashIndex(impl->header.maxFrame);
+  assert(impl->walIndexSize > index);
+  assert(impl->walIndexData[index] != NULL);
+  i = __walHashGet(impl, index, &location);
+  if (NEVER(i)) {
+    return;
+  }
+
+  /* Zero all hash-table entries that correspond to frame numbers greater
+   ** than pWal->hdr.mxFrame.
+   */
+  limit = (int)(impl->header.maxFrame - location.zeroFrame);
+  assert(limit > 0);
+  for (i = 0; i < HASHTABLE_NSLOT; i++) {
+    if (location.hash[i] > limit) {
+      location.hash[i] = NULL;
+    }
+  }
+
+  /* Zero the entries in the aPgno array that correspond to frames with
+   ** frame numbers greater than pWal->hdr.mxFrame.
+   */
+  byte = (int)((char *)location.hash - (char *)&location.pageNo[limit + 1]);
+  memset(&location.hash[limit + 1], 0, byte);
 }
 
 static inline bool __walIsIndexHeaderChanged(wal_impl_v1_t *impl) {
@@ -1346,7 +1426,7 @@ static udb_code_t __walIndexAppend(wal_impl_v1_t *impl, wal_frame_t frame,
   udb_code_t rc;
   wal_hash_location_t location;
 
-  rc = __wal_hash_get(impl, __walFrameHashIndex(frame), &location);
+  rc = __walHashGet(impl, __walFrameHashIndex(frame), &location);
   if (rc != UDB_OK) {
     return rc;
   }
@@ -1391,3 +1471,88 @@ static udb_code_t __walIndexAppend(wal_impl_v1_t *impl, wal_frame_t frame,
 
   return rc;
 }
+
+/*
+** Write the header information in impl->header into the wal-index.
+**
+** The checksum on impl->header is updated before it is written.
+*/
+static void __walIndexWriteHeader(wal_impl_v1_t *impl) {
+  volatile wal_index_header_t *header = __walIndexHeader(impl);
+  const int cksumOff = offsetof(wal_index_header_t, ckSum);
+
+  assert(impl->writeLock != 0);
+  impl->header.isInit = true;
+  impl->header.version = WAL_VERSION;
+  __walChecksumBytes(true, (uint8_t *)&impl->header, cksumOff, 0,
+                     impl->header.ckSum);
+  memcpy((void *)&header[1], (const void *)&impl->header,
+         sizeof(wal_index_header_t));
+  memcpy((void *)&header[0], (const void *)&impl->header,
+         sizeof(wal_index_header_t));
+}
+
+/*
+** Return a pointer to the wal_checkpoint_t structure in the wal-index.
+*/
+static volatile wal_checkpoint_t *__walCheckpoint(wal_impl_v1_t *impl) {
+  assert(impl->walIndexSize > 0 && impl->walIndexData[0] != NULL);
+  return (volatile wal_checkpoint_t
+              *)(impl->walIndexData[0][sizeof(wal_index_header_t) / 2]);
+}
+
+/*
+** Generate or extend an 8 byte checksum based on the data in
+** array aByte[] and the initial values of aIn[0] and aIn[1] (or
+** initial values of 0 and 0 if aIn==NULL).
+**
+** The checksum is written back into aOut[] before returning.
+**
+** nByte must be a positive multiple of 8.
+*/
+static void __walChecksumBytes(
+    bool nativeCksum, /* True for native byte-order, false for non-native */
+    uint8_t *data,    /* Content to be checksummed */
+    int byte, /* Bytes of content in data[].  Must be a multiple of 8. */
+    const uint32_t *in, /* Initial checksum value input */
+    uint32_t *out       /* OUT: Final checksum value output */
+) {
+  uint32_t s1, s2;
+  uint32_t *start = data;
+  uint32_t *end = (uint32_t *)&data[byte];
+
+  if (in != NULL) {
+    s1 = in[0];
+    s2 = in[1];
+  } else {
+    s1 = s2 = 0;
+  }
+
+  assert(byte >= 8);
+  assert((byte & 0x00000007) == 0);
+  assert(byte < 65536);
+
+  if (nativeCksum) {
+    do {
+      s1 += (*start++) + s2;
+      s2 += (*start++) + s1;
+    } while (start < end);
+  } else {
+    do {
+      s1 += BYTESWAP32(start[0]) + s2;
+      s2 += BYTESWAP32(start[1]) + s1;
+    } while (start < end);
+  }
+
+  out[0] = s1;
+  out[1] = s2;
+}
+
+/*
+** Check to see if the frame with header in aFrame[] and content
+** in aData[] is valid.  If it is a valid frame, fill *piPage and
+** *pnTruncate and return true.  Return if the frame is not valid.
+*/
+static bool __walDecodeFrame(wal_impl_v1_t *impl, page_no_t *pageNo,
+                             uint32_t *truncateSize, uint8_t *data,
+                             uint8_t *frameData) {}

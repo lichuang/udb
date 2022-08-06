@@ -52,7 +52,7 @@ udb_code_t pager_open(udb_t *udb, pager_t **pager) {
   if (err != UDB_OK) {
     goto open_pager_error;
   }
-  err = wal_open(db_file, &wal);
+  err = walOpen(db_file, &wal);
   if (err != UDB_OK) {
     goto open_pager_error;
   }
@@ -76,7 +76,7 @@ open_pager_error:
     file_close(db_file);
   }
   if (wal != NULL) {
-    wal_close(wal);
+    walClose(wal);
   }
   if (ret_pager != NULL) {
     memory_free(ret_pager);
