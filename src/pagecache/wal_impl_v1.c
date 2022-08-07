@@ -476,6 +476,7 @@ typedef struct wal_impl_v1_t {
   uint8_t readOnly;           /* WAL_RDWR, WAL_RDONLY */
   wal_index_header_t header;  /* Wal-index header for current transaction */
   wal_frame_t minFrame;       /* Ignore wal frames before this one */
+  uint32_t reCksum;           /* On commit, recalculate checksums from here */
   const char *walName;        /* Name of WAL file */
   uint32_t checkpointCounter; /* Checkpoint counter in the wal-header */
 #ifdef UDB_DEBUG
@@ -484,13 +485,22 @@ typedef struct wal_impl_v1_t {
 } wal_impl_v1_t;
 
 /* WAL Header layout offset */
-enum wal_header_layout_offset_t {
+enum {
   WAL_HEADER_MAGIC_OFFSET = 0,               /* Offset of Magic Number */
   WAL_HEADER_PAGESIZE_OFFSET = 8,            /* Offset of page size */
   WAL_HEADER_CHECKPOINT_COUNTER_OFFSET = 12, /* Offset of checkpoint counter */
   WAL_HEADER_SALT_OFFSET = 16,               /* Offset of salt */
   WAL_HEADER_FRAME_CKSUM1_OFFSET = 24,       /* Offset of frame checksum 1 */
   WAL_HEADER_FRAME_CKSUM2_OFFSET = 28,       /* Offset of frame checksum 2 */
+};
+
+/* WAL Frame layout offset */
+enum {
+  WAL_FRAME_PAGE_NO_OFFSET = 0,      /* Offset of page number */
+  WAL_FRAME_DB_PAGE_SIZE_OFFSET = 4, /* Offset of page size of database */
+  WAL_FRAME_SALT_OFFSET = 8,         /* Offset of salt */
+  WAL_FRAME_CKSUM1_OFFSET = 16,      /* Offset of checksum-1 */
+  WAL_FRAME_CKSUM2_OFFSET = 20,      /* Offset of checksum-2 */
 };
 
 /*
@@ -537,6 +547,8 @@ static volatile wal_checkpoint_t *__walCheckpoint(wal_impl_v1_t *);
 
 static void __walChecksumBytes(bool, uint8_t *, int, const uint32_t *,
                                uint32_t *);
+static void __walEncodeFrame(wal_impl_v1_t *, page_no_t, uint32_t, uint8_t *,
+                             uint8_t *);
 static bool __walDecodeFrame(wal_impl_v1_t *, page_no_t *, uint32_t *,
                              uint8_t *, uint8_t *);
 
@@ -1548,11 +1560,78 @@ static void __walChecksumBytes(
   out[1] = s2;
 }
 
+static void
+__walEncodeFrame(wal_impl_v1_t *impl, /* The write-ahead log */
+                 page_no_t pageNo,    /* Database page number for frame */
+                 uint32_t dbSize, /* New db size (or 0 for non-commit frames) */
+                 uint8_t *data,   /* Pointer to page data */
+                 uint8_t *frame   /* OUT: Write encoded frame here */
+) {
+  bool nativeCksum; /* True for native byte-order checksums */
+  uint32_t *ckSum = impl->header.ckSum;
+
+  assert(WAL_FRAME_HEADER_SIZE == 24);
+
+  put4Byte(frame[WAL_FRAME_PAGE_NO_OFFSET], pageNo);
+  put4Byte(frame[WAL_FRAME_DB_PAGE_SIZE_OFFSET], dbSize);
+  if (impl->reCksum == 0) {
+    memcpy(&frame[WAL_FRAME_SALT_OFFSET], impl->header.salt, 8);
+    nativeCksum = impl->header.bigEndCksum == UDB_BIGENDIAN;
+    __walChecksumBytes(nativeCksum, frame, 8, ckSum, ckSum);
+    __walChecksumBytes(nativeCksum, data, 8, impl->pageSize, ckSum);
+
+    put4Byte(&frame[WAL_FRAME_CKSUM1_OFFSET], ckSum[0]);
+    put4Byte(&frame[WAL_FRAME_CKSUM2_OFFSET], ckSum[1]);
+  } else {
+    memset(frame[8], 0, 16);
+  }
+}
 /*
-** Check to see if the frame with header in aFrame[] and content
-** in aData[] is valid.  If it is a valid frame, fill *piPage and
-** *pnTruncate and return true.  Return if the frame is not valid.
+** Check to see if the frame with header in frameData[] and content
+** in data[] is valid.  If it is a valid frame, fill *pageNo and
+** *truncateSize and return true.  Return false if the frame is not valid.
 */
-static bool __walDecodeFrame(wal_impl_v1_t *impl, page_no_t *pageNo,
-                             uint32_t *truncateSize, uint8_t *data,
-                             uint8_t *frameData) {}
+static bool
+__walDecodeFrame(wal_impl_v1_t *impl, /* The write-ahead log */
+                 page_no_t *pageNo,   /* OUT: Database page number for frame */
+                 uint32_t *dbSize, /* OUT: New db size (or 0 if not commit) */
+                 uint8_t *data,    /* Pointer to page data (for checksum) */
+                 uint8_t *frame    /* Frame data */
+) {
+  bool nativeCksum; /* True for native byte-order checksums */
+  uint32_t *ckSum = impl->header.ckSum;
+  uint32_t no;
+
+  assert(WAL_FRAME_HEADER_SIZE == 24);
+
+  /* A frame is only valid if the salt values in the frame-header
+   ** match the salt values in the wal-header.
+   */
+  if (memcmp(&impl->header.salt, &frame[WAL_FRAME_SALT_OFFSET], 8) != 0) {
+    return false;
+  }
+
+  /* A frame is only valid if the page number is creater than zero.
+   */
+  no = get4Byte(&frame[WAL_FRAME_PAGE_NO_OFFSET]);
+  if (no == INVALID_PAGE_NO) {
+    return false;
+  }
+
+  /* A frame is only valid if a checksum of the WAL header,
+   ** all prior frams, the first 16 bytes of this frame-header,
+   ** and the frame-data matches the checksum in the last 8
+   ** bytes of this frame-header.
+   */
+  nativeCksum = (impl->header.bigEndCksum == UDB_BIGENDIAN);
+  __walChecksumBytes(nativeCksum, frame, 8, ckSum, ckSum);
+  __walChecksumBytes(nativeCksum, data, impl->pageSize, ckSum, ckSum);
+  if (ckSum[0] != get4Byte(&frame[WAL_FRAME_CKSUM1_OFFSET]) ||
+      ckSum[1] != get4Byte(&frame[WAL_FRAME_CKSUM2_OFFSET])) {
+    return false;
+  }
+
+  *pageNo = no;
+  *dbSize = get4Byte(&frame[WAL_FRAME_DB_PAGE_SIZE_OFFSET]);
+  return true;
+}

@@ -11,6 +11,7 @@ typedef struct global_config_t global_config_t;
 typedef struct mutex_t mutex_t;
 
 typedef uint32_t page_no_t;
+static const page_no_t INVALID_PAGE_NO = 0;
 
 typedef uint64_t offset_t;
 
