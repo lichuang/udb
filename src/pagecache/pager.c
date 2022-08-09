@@ -165,14 +165,14 @@ static udb_code_t read_db_page(page_t *page) {
   file_t *db = pager->db_file;
   offset_t offset;
 
-  err = wal_find_frame(wal, id, &frame);
+  err = walFindFrame(wal, id, &frame);
   if (err != UDB_OK) {
     return err;
   }
 
   if (IS_VALID_WAL_FRAME(frame)) {
     /* In this case the current page in the wal frame, just read it from wal */
-    err = wal_read_frame(wal, frame, pager->pageSize, page->data);
+    err = walReadFrame(wal, frame, pager->pageSize, page->data);
   } else {
     /* Read the page from database file */
     offset = from_page_id_to_offset(pager, id);

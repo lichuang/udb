@@ -473,7 +473,7 @@ typedef struct wal_impl_v1_t {
   int16_t readLock;           /* Which read lock is being held.  -1 for none */
   bool writeLock;             /* True if in a write transaction */
   bool checkpointLock;        /* True if holding a checkpoint lock */
-  uint8_t readOnly;           /* WAL_RDWR, WAL_RDONLY */
+  bool truncateOnCommit;      /* True to truncate WAL file on commit */
   wal_index_header_t header;  /* Wal-index header for current transaction */
   wal_frame_t minFrame;       /* Ignore wal frames before this one */
   uint32_t reCksum;           /* On commit, recalculate checksums from here */
@@ -519,7 +519,11 @@ udb_code_t __FindFrame_impl_v1(wal_impl_t *, page_no_t, wal_frame_t *);
 udb_code_t __ReadFrame_impl_v1(wal_impl_t *, wal_frame_t, uint32_t bufferSize,
                                void *buffer);
 udb_code_t __BeginReadTransaction_impl_v1(wal_impl_t *, bool *);
-udb_code_t __EndReadTransaction_impl_v1(wal_impl_t *);
+void __EndReadTransaction_impl_v1(wal_impl_t *);
+
+udb_code_t __BeginWriteTransaction_impl_v1(wal_impl_t *);
+udb_code_t __EndWriteTransaction_impl_v1(wal_impl_t *);
+
 void __Destroy_v1(wal_impl_t *);
 
 /* Static internal function forward declarations */
@@ -645,6 +649,66 @@ udb_code_t __BeginReadTransaction_impl_v1(wal_impl_t *arg, bool *changed) {
   } while (rc == UDB_WAL_RETRY);
 
   return rc;
+}
+
+void __EndReadTransaction_impl_v1(wal_impl_t *arg) {
+  wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+  __EndWriteTransaction_impl_v1(impl);
+  if (impl->readLock >= 0) {
+    impl->readLock = -1;
+  }
+}
+
+/*
+** This function starts a write transaction on the WAL.
+**
+** A read transaction must have already been started by a prior call
+** to sqlite3WalBeginReadTransaction().
+**
+** If another thread or process has written into the database since
+** the read transaction was started, then it is not possible for this
+** thread to write as doing so would cause a fork.  So this routine
+** returns SQLITE_BUSY in that case and no write transaction is started.
+**
+** There can only be a single writer active at a time.
+*/
+udb_code_t __BeginWriteTransaction_impl_v1(wal_impl_t *arg) {
+  wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+
+  /* Cannot start a write transaction without first holding a read
+   ** transaction. */
+  assert(impl->readLock >= 0);
+  assert(impl->writeLock == 0 && impl->reCksum == 0);
+
+  /* Only one writer allowed at a time.  Get the write lock.  Return
+   ** SQLITE_BUSY if unable.
+   */
+  impl->writeLock = 1;
+
+  /* If another connection has written to the database file since the
+   ** time the read transaction on this connection was started, then
+   ** the write is disallowed.
+   */
+  if (__walIsIndexHeaderChanged(impl)) {
+    impl->writeLock = 0;
+    return UDB_BUSY;
+  }
+
+  return UDB_OK;
+}
+
+/*
+** End a write transaction.  The commit has already been done.  This
+** routine merely releases the lock.
+*/
+udb_code_t __EndWriteTransaction_impl_v1(wal_impl_t *arg) {
+  wal_impl_v1_t *impl = (wal_impl_v1_t *)arg;
+
+  if (impl->writeLock != 0) {
+    impl->writeLock = 0;
+    impl->reCksum = 0;
+    impl->truncateOnCommit = false;
+  }
 }
 
 void __Destroy_v1(wal_impl_t *impl) {}
@@ -1583,9 +1647,10 @@ __walEncodeFrame(wal_impl_v1_t *impl, /* The write-ahead log */
     put4Byte(&frame[WAL_FRAME_CKSUM1_OFFSET], ckSum[0]);
     put4Byte(&frame[WAL_FRAME_CKSUM2_OFFSET], ckSum[1]);
   } else {
-    memset(frame[8], 0, 16);
+    memset(frame[WAL_FRAME_SALT_OFFSET], 0, 16);
   }
 }
+
 /*
 ** Check to see if the frame with header in frameData[] and content
 ** in data[] is valid.  If it is a valid frame, fill *pageNo and

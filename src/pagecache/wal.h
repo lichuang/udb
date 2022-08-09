@@ -43,7 +43,12 @@ udb_code_t walClose(wal_t *);
 udb_code_t walBeginReadTransaction(wal_t *, bool *);
 udb_code_t walEndReadTransaction(wal_t *);
 
-udb_code_t wal_find_frame(wal_t *, page_no_t, wal_frame_t *);
-udb_code_t wal_read_frame(wal_t *, wal_frame_t, uint32_t, void *);
+/* Read a page from the write-ahead log, if it is present. */
+udb_code_t walFindFrame(wal_t *, page_no_t, wal_frame_t *);
+udb_code_t walReadFrame(wal_t *, wal_frame_t, uint32_t, void *);
+
+/* Obtain or release the WRITER lock. */
+int walBeginWriteTransaction(wal_t *);
+int walEndWriteTransaction(wal_t *);
 
 #endif /* _UDB_WAL_H_ */

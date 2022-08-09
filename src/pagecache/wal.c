@@ -44,7 +44,7 @@ udb_code_t walBeginReadTransaction(wal_t *wal, bool *changed) {
 ** Return UDB_OK if successful, or an error code if an error occurs. If an
 ** error does occur, the final value of *frame is undefined.
 */
-udb_code_t wal_find_frame(wal_t *wal, page_no_t no, wal_frame_t *frame) {
+udb_code_t walFindFrame(wal_t *wal, page_no_t no, wal_frame_t *frame) {
   wal->methods.FindFrame(wal->impl, no, frame);
 }
 
@@ -53,7 +53,7 @@ udb_code_t wal_find_frame(wal_t *wal, page_no_t no, wal_frame_t *frame) {
 ** (which is bufferSize bytes in size). Return UDB_OK if successful, or an
 ** error code otherwise.
 */
-udb_code_t wal_read_frame(wal_t *wal, wal_frame_t readFrame,
-                          uint32_t bufferSize, void *buffer) {
+udb_code_t walReadFrame(wal_t *wal, wal_frame_t readFrame, uint32_t bufferSize,
+                        void *buffer) {
   return wal->methods.ReadFrame(wal->impl, readFrame, bufferSize, buffer);
 }
