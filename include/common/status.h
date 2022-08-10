@@ -4,15 +4,16 @@
 #include <string>
 
 namespace udb {
+
 class UDB_EXPORT Status {
 public:
-  bool ok() const { return code_ == kOK; }
+  Status() : code_(kOk), context_("") {}
+  bool Ok() const { return code_ == kOk; }
 
 private:
   enum Code {
-    kOK = 0,
+    kOk = 0,
   };
-
   Code code_;
   std::string context_;
 };

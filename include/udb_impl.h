@@ -25,6 +25,6 @@ public:
   // Extra methods (for testing) that are not in the public Database interface
 
 private:
-  BPTree *tree;
+  Tree *tree;
 }; // class Database
 } // namespace udb

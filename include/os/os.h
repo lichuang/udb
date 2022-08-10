@@ -3,5 +3,5 @@
 #include "common/export.h"
 
 namespace udb {
-class UDB_EXPORT Env {};
+class UDB_EXPORT Os {};
 } // namespace udb

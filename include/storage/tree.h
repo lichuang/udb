@@ -7,14 +7,17 @@
 #include "common/types.h"
 
 namespace udb {
-class UDB_EXPORT BPTree {
+// B+Tree implementation
+class UDB_EXPORT Tree {
 public:
-  BPTree(const Options &options, const string &name);
+  Tree(const Options &options, const string &name, Os *os);
 
-  BPTree(const BPTree &) = delete;
-  BPTree &operator=(const BPTree &) = delete;
+  Tree(const Tree &) = delete;
+  Tree &operator=(const Tree &) = delete;
 
-  ~BPTree();
+  ~Tree();
+
+  PageNo RootPage() const { return root_; }
 
   // begin and commit transaction.
   Status BeginTxn(bool isWrite);
@@ -26,10 +29,11 @@ public:
   Status Get(const ReadOptions &options, const Slice &key, std::string *value);
 
 private:
-  Status MoveTo(const Slice &key, BptCursor *);
+  Status MoveTo(Cursor *);
 
 private:
-  Env *env_;
+  Os *os_;
+  PageNo root_; // Root page number.
   File *db_file_;
   BufferManager *buffer_manager_;
 };
