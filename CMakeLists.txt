@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.0)
 
-project(libudb C)
+project(libudb)
+
+#set_target_properties(libudb PROPERTIES LINKER_LANGUAGE CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Debug")
@@ -14,7 +16,7 @@ set(CXX_FLAGS
  -D_FILE_OFFSET_BITS=64
  -Wall
  -Wextra
- -Werror
+ #-Werror
  #-Wconversion
  -Wno-unused-parameter
  #-Wold-style-cast
@@ -23,10 +25,10 @@ set(CXX_FLAGS
  -Wpointer-arith
  -Wshadow
  -Wwrite-strings
- -march=native
+ #-march=native
  # -MMD
  -std=c++11
- -rdynamic
+ #-rdynamic
  )
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -43,7 +45,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 set(LIBRARY_OUTPUT_PATH ${PROJECT_BINARY_DIR}/lib)
 
-INCLUDE_DIRECTORIES(include/udb)
+INCLUDE_DIRECTORIES(include)
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/third_party/include)
 LINK_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/third_party/lib)
 

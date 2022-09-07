@@ -1,8 +1,8 @@
 #pragma once
 
 #include "common/export.h"
-#include "common/options.h"
 #include "common/types.h"
+#include "udb.h"
 
 namespace udb {
 class BufferManager {
