@@ -25,8 +25,19 @@ public:
   // Close the database, Returns OK on success.
   virtual Status Close(Database *) override;
 
+  static DBImpl *Instance();
+
+private:
+  // Lock and return the index.
+  int Lock(bool write);
+
+  void Unlock(int lockIndex);
+
 private:
   std::map<std::string, BTree *> tree_map_;
   BTree *default_tree_;
 }; // class Database
+
+#define DBInstance DBImpl::Instance()
+
 } // namespace udb

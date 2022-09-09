@@ -8,9 +8,12 @@ DBImpl::DBImpl(const Options &options, const std::string &path) {}
 
 DBImpl::~DBImpl() {}
 
-Txn *DBImpl::Begin(bool write) { return new TxnImpl(this, write); }
+Txn *DBImpl::Begin(bool write) {
+  int lockIndex = Lock(write);
+  return new TxnImpl(write, lockIndex);
+}
 
-Status DBImpl::Commit(Txn *) {
+Status DBImpl::Commit(Txn *txn) {
   Status status;
   return status;
 }
@@ -19,6 +22,10 @@ Status DBImpl::Close(Database *) {
   Status status;
   return status;
 }
+
+int DBImpl::Lock(bool write) { return 0; }
+
+void Unlock(int lockIndex) {}
 
 Database::~Database() = default;
 

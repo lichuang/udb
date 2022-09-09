@@ -2,8 +2,8 @@
 #include "storage/cursor.h"
 
 namespace udb {
-TxnImpl::TxnImpl(DBImpl *db, bool write)
-    : db_(db), write_(write), cursor_(new Cursor(this)) {}
+TxnImpl::TxnImpl(bool write, int lockIndex)
+    : write_(write), lockIndex_(lockIndex), cursor_(new Cursor(this)) {}
 
 TxnImpl::~TxnImpl() { delete cursor_; }
 

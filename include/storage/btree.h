@@ -8,7 +8,7 @@ namespace udb {
 
 class BTree {
 public:
-  BTree(DBImpl *, PageNo root, const std::string &name);
+  BTree(PageNo root, const std::string &name);
 
   BTree(const BTree &) = delete;
   BTree &operator=(const BTree &) = delete;
@@ -21,8 +21,9 @@ public:
 
   Status Get(TxnImpl *, const Slice &key, Slice *value);
 
-public:
-  DBImpl *db_;
+  PageNo Root() const { return root_; }
+
+private:
   PageNo root_;
 }; // class Database
 } // namespace udb

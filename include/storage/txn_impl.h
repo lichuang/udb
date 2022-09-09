@@ -8,7 +8,7 @@ class Cursor;
 
 class TxnImpl : public Txn {
 public:
-  TxnImpl(DBImpl *, bool write);
+  TxnImpl(bool write, int lockIndex);
 
   TxnImpl() = default;
 
@@ -28,9 +28,12 @@ public:
 
   virtual Status Get(BTree *, const Slice &key, Slice *value) override;
 
+  int LockIndex() const { return lockIndex_; }
+
+private:
 public:
-  DBImpl *db_;
   bool write_;
+  int lockIndex_;
   Cursor *cursor_;
 };
 } // namespace udb

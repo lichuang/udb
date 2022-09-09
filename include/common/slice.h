@@ -21,7 +21,7 @@ namespace udb {
 class UDB_EXPORT Slice {
 public:
   // Create an empty slice.
-  Slice() : data_(""), size_(0) {}
+  Slice() : data_(nullptr), size_(0) {}
 
   // Create a slice that refers to d[0,n-1].
   Slice(const char *d, size_t n) : data_(d), size_(n) {}
@@ -44,6 +44,11 @@ public:
 
   // Return true iff the length of the referenced data is zero
   bool Empty() const { return size_ == 0; }
+
+  void Clear() {
+    data_ = nullptr;
+    size_ = 0;
+  }
 
   // Return the ith byte in the referenced data.
   // REQUIRES: n < size()
