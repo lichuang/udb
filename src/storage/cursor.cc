@@ -13,6 +13,8 @@ void Cursor::Reset() {
   tree_ = nullptr;
   root_ = kInvalidPageNo;
   location_ = Invalid;
+  cellIndex_ = -1;
+  curIndex_ = -1;
   page_ = nullptr;
   key_.Clear();
 }
@@ -20,6 +22,11 @@ void Cursor::Reset() {
 bool Cursor::IsReseted() const {
   return tree_ == nullptr && root_ == kInvalidPageNo && location_ == Invalid &&
          key_.Empty();
+}
+
+void Cursor::GetCell() {
+  if (cell_.IsEmpty()) {
+  }
 }
 
 Status Cursor::MoveTo(BTree *tree, const Slice &key) {
@@ -69,5 +76,7 @@ Status Cursor::MoveToRoot() {
 
   return status;
 }
+
+void Cursor::ParseCell() {}
 
 } // namespace udb

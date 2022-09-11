@@ -18,8 +18,26 @@ Status TxnImpl::DeleteTree(const std::string &name) {
   return status;
 }
 
-Status TxnImpl::Write(BTree *, const Slice &key, const Slice &value) {
+Status TxnImpl::Write(BTree *tree, const Slice &key, const Slice &value) {
   Status status;
+  CursorLocation location;
+
+  status = cursor_->MoveTo(tree, key);
+  if (!status.Ok()) {
+    return status;
+  }
+  Assert(cursor_->IsValid());
+  location = cursor_->Location();
+
+  // If the cursor is currently pointing to the the entry, check whether
+  // the size of the entry is the same as the new content, if so then use the
+  // overwrite optimization.
+  if (location == Equal) {
+    cursor_->GetCell();
+    if (cursor_->PayloadSize() == value.Size()) {
+      return cursor_->Overwrite(key, value);
+    }
+  }
   return status;
 }
 
