@@ -8,9 +8,8 @@
 
 namespace udb {
 class BTree;
+class MemPage;
 class TxnImpl;
-
-const static int kCursorMaxDepth = 20;
 
 enum CursorLocation {
   Invalid = 0,
@@ -29,7 +28,7 @@ public:
 
   ~Cursor();
 
-  bool IsReseted() const { return tree_ == nullptr && location_ == Invalid; }
+  bool IsReseted() const;
 
   void Reset();
   Status MoveTo(BTree *, const Slice &key);
@@ -60,9 +59,9 @@ private:
   Cell cell_;   // A parse of the cell we are pointing at.
   PageNo root_; // root page no of BTree
   CursorLocation location_;
-  int8_t cellIndex_;                  // Index of cursor in current page.
-  int8_t curIndex_;                   // Index of current page in pageStack_
-  MemPage *page_;                     // current page
-  MemPage *pageStack_[kMaxDepth - 1]; // Stack of parents of current page
+  int8_t cellIndex_;                      // Index of cursor in current page.
+  int8_t curIndex_;                       // Index of current page in pageStack_
+  MemPage *page_;                         // current page
+  MemPage *pageStack_[kTreeMaxDepth - 1]; // Stack of parents of current page
 };
 } // namespace udb

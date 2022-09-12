@@ -45,11 +45,6 @@ public:
   // Return true iff the length of the referenced data is zero
   bool Empty() const { return size_ == 0; }
 
-  void Clear() {
-    data_ = nullptr;
-    size_ = 0;
-  }
-
   // Return the ith byte in the referenced data.
   // REQUIRES: n < size()
   char operator[](size_t n) const {

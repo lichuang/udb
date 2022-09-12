@@ -73,6 +73,23 @@ Status Cursor::MoveToRoot() {
   Assert(root_ != kInvalidPageNo);
 
   Status status;
+  MemPage *rootPage;
+
+  // Load the root page of b-tree
+
+  if (curIndex_ >= 0) {
+    // curIndex_ >= 0 means that the root has been loaded.
+    page_ = pageStack_[0];
+  } else {
+    // else load the page from pager
+    status = Pager->GetPage(root_, &page_);
+    if (!status.Ok()) {
+      return status;
+    }
+    curIndex_ = 0;
+  }
+  rootPage = page_;
+  Assert(rootPage->MemPageNo() == root_);
 
   return status;
 }

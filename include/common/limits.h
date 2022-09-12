@@ -3,6 +3,6 @@
 namespace udb {
 // Max depth of the B-Tree. Any B-Tree deeper than this
 // will be declared as corrupted.
-static const int kMaxDepth = 20;
+static const int kTreeMaxDepth = 20;
 
 }; // namespace udb

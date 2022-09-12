@@ -1,6 +1,7 @@
 set(libudb_files
   src/buffer/buffer_manager.cc
   src/storage/cursor.cc
+  src/storage/mem_page.cc
   src/storage/txn_impl.cc
   src/storage/udb_impl.cc
 )
