@@ -51,11 +51,13 @@ Status Cursor::MoveTo(BTree *tree, const Slice &key) {
   while (true) {
     page = page_;
 
+    // Search the key in the page
     status = page->Search(key, this, &childNo);
     if (!status.Ok()) {
       return status;
     }
 
+    // Has reached the leaf page, break out of loop.
     if (page->IsLeaf()) {
       break;
     }

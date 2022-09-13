@@ -1,14 +1,10 @@
 #pragma once
 
+#include "common/code.h"
 #include "common/export.h"
 #include <string>
 
 namespace udb {
-// Code for operation results.
-enum UDB_EXPORT Code {
-  kOk = 0,
-  kCorrupt = 1,
-};
 
 class UDB_EXPORT Status {
 public:
@@ -26,5 +22,8 @@ private:
   Code code_;
   std::string context_;
 };
+
+Code SaveErrorStatus(const Status &status);
+Status GetErrorStatus();
 
 } // namespace udb

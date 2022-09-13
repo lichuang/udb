@@ -79,6 +79,8 @@ inline bool operator==(const Slice &x, const Slice &y) {
 
 inline bool operator!=(const Slice &x, const Slice &y) { return !(x == y); }
 
+inline bool operator>(const Slice &x, const Slice &y) { x.Compare(y) > 0; }
+
 inline int Slice::Compare(const Slice &b) const {
   const size_t min_len = (size_ < b.size_) ? size_ : b.size_;
   int r = memcmp(data_, b.data_, min_len);

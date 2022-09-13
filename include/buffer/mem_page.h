@@ -17,28 +17,34 @@ public:
   MemPage(const MemPage &) = delete;
   MemPage &operator=(const MemPage &) = delete;
 
-  Status InitFromPage(Page *);
+  Code InitFromPage(Page *);
 
   PageNo MemPageNo() const { return pageNo_; }
   int CellNumber() const { return cellNum_; }
   bool IsLeaf() const { return isLeaf_; }
 
-  Status Search(const Slice &key, Cursor *, PageNo *);
+  // Search the key in the page.
+  // If not reached the leaf page, return child page no in pageNo and kOk.
+  // Return error otherwise.
+  Code Search(const Slice &key, Cursor *, PageNo *);
 
   void ParseCell(Cursor *);
 
 private:
-  void ReadPageHeader(unsigned char *data, PageNo pageNo);
+  Code ReadPageHeader(unsigned char *data, PageNo pageNo);
   void ParseLeafPageCell(Cursor *);
   void ParseInternalPageCell(Cursor *);
+
+  // Return the i-th cell info.
+  Code GetCell(int i, Cell *);
 
 private:
   Page *page_;
   PageNo pageNo_;
-  uint8_t headerOffset_; // 100 for page 1.  0 otherwise
-  int cellNum_;          // The number of cells
-  bool isLeaf_;          // True if the page is a leaf page.
-  unsigned char *data_;  // Pointer to disk image of the page data
-  Status status_;
+  uint16_t headerOffset_; // 100 for page 1.  0 otherwise
+  uint16_t headerSize_;   // 12 bytes for internal-page, 8 bytes for leaf page.
+  int cellNum_;           // The number of cells
+  bool isLeaf_;           // True if the page is a leaf page.
+  unsigned char *data_;   // Pointer to disk image of the page data
 };
 }; // namespace udb

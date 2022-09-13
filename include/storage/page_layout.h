@@ -115,13 +115,20 @@
 
 namespace udb {
 // Page 1 header offset
-static const uint8_t kPage1HeaderOffset = 100;
+static const uint16_t kPage1HeaderOffset = 100;
+
+// Page header size.
+static const uint16_t kInternalPageHeaderSize = 12;
+static const uint16_t kLeafPageHeaderSize = 8;
+
+// Offset of cell pointers array.
+#define kCellPtrOffet (headerOffset_ + headerSize_)
 
 // Page header field offsets
-static const uint8_t kPageFlagHeaderOffset = 0;
-static const uint8_t kFirstFreeblockHeaderOffset = 1;
-static const uint8_t kCellNumberHeaderOffset = 3;
-static const uint8_t kCellContentHeaderOffset = 5;
+static const uint16_t kPageFlagHeaderOffset = 0;
+static const uint16_t kFirstFreeblockHeaderOffset = 1;
+static const uint16_t kCellNumberHeaderOffset = 3;
+static const uint16_t kCellContentHeaderOffset = 5;
 
 // Page flags
 static const char kInternalPage = 1;
