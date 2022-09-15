@@ -3,6 +3,7 @@
 #include "common/slice.h"
 #include "common/status.h"
 #include "common/types.h"
+#include "storage/storage_types.h"
 
 namespace udb {
 class Cell;
@@ -26,12 +27,12 @@ public:
   // Search the key in the page.
   // If not reached the leaf page, return child page no in pageNo and kOk.
   // Return error otherwise.
-  Code Search(const Slice &key, Cursor *, PageNo *);
+  Code Search(const Slice &key, Cursor *, PageNo *, CursorLocation *);
 
   void ParseCell(Cursor *);
 
 private:
-  Code ReadPageHeader(unsigned char *data, PageNo pageNo);
+  Code ReadPageHeader(char *data, PageNo pageNo);
   void ParseLeafPageCell(Cursor *);
   void ParseInternalPageCell(Cursor *);
 
@@ -45,6 +46,6 @@ private:
   uint16_t headerSize_;   // 12 bytes for internal-page, 8 bytes for leaf page.
   int cellNum_;           // The number of cells
   bool isLeaf_;           // True if the page is a leaf page.
-  unsigned char *data_;   // Pointer to disk image of the page data
+  char *data_;            // Pointer to disk image of the page data
 };
 }; // namespace udb

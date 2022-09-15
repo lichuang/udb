@@ -1,7 +1,7 @@
 #pragma once
 
+#include "common/code.h"
 #include "common/export.h"
-#include "common/status.h"
 #include "common/types.h"
 #include "udb.h"
 
@@ -16,7 +16,7 @@ public:
 
   static BufferManager *Instance();
 
-  Status GetPage(PageNo no, MemPage **page);
+  Code GetPage(PageNo no, MemPage **page);
 
 private:
   int pageSize_;

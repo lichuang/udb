@@ -5,18 +5,12 @@
 #include "common/status.h"
 #include "common/types.h"
 #include "storage/cell.h"
+#include "storage/storage_types.h"
 
 namespace udb {
 class BTree;
 class MemPage;
 class TxnImpl;
-
-enum CursorLocation {
-  Invalid = 0,
-  Left,
-  Equal,
-  Right,
-};
 
 // Cursor of b+tree
 class UDB_EXPORT Cursor {
@@ -31,7 +25,7 @@ public:
   bool IsReseted() const;
 
   void Reset();
-  Status MoveTo(BTree *, const Slice &key);
+  Code MoveTo(BTree *, const Slice &key);
 
   CursorLocation Location() const { return location_; }
   uint16_t KeySize() const { return cell_.KeySize(); }
@@ -47,10 +41,11 @@ public:
   Status Overwrite(const Slice &key, const Slice &value);
 
 private:
-  Status MoveToRoot();
-  Status MoveToChild(PageNo chidNo);
+  Code MoveToRoot();
+  Code MoveToChild(PageNo chidNo);
 
   void ParseCell();
+  void Reset();
 
 private:
   TxnImpl *txn_;

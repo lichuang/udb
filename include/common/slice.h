@@ -59,13 +59,13 @@ public:
   }
 
   // Return a string that contains the copy of the referenced data.
-  std::string ToString() const { return std::string(data_, size_); }
+  std::string String() const { return std::string(data_, size_); }
 
   // Three-way comparison.  Returns value:
   //   <  0 iff "*this" <  "b",
   //   == 0 iff "*this" == "b",
   //   >  0 iff "*this" >  "b"
-  int Compare(const Slice &b) const;
+  int Compare(const char *data, size_t len) const;
 
 private:
   const char *data_;
@@ -79,18 +79,20 @@ inline bool operator==(const Slice &x, const Slice &y) {
 
 inline bool operator!=(const Slice &x, const Slice &y) { return !(x == y); }
 
+inline bool operator>(const Slice &x, const Slice &y) {
+  x.Compare(y.Data(), y.Size()) > 0;
+}
+
 inline bool operator>(const Slice &x, const Slice &y) { x.Compare(y) > 0; }
 
-inline int Slice::Compare(const Slice &b) const {
-  const size_t min_len = (size_ < b.size_) ? size_ : b.size_;
-  int r = memcmp(data_, b.data_, min_len);
-  if (r == 0) {
-    if (size_ < b.size_)
-      r = -1;
-    else if (size_ > b.size_)
-      r = +1;
+inline int Slice::Compare(const char *data, size_t len) const {
+  const size_t minLen = std::min(len, size_);
+  int r = memcmp(data_, data, minLen);
+  if (r != 0) {
+    return r;
   }
-  return r;
+
+  return (size_ < len) ? -1 : 1;
 }
 
 } // namespace udb

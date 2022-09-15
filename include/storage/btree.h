@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "common/slice.h"
 #include "common/types.h"
 #include "storage/txn_impl.h"
@@ -23,7 +25,10 @@ public:
 
   PageNo Root() const { return root_; }
 
+  std::string Name() const { return name_; }
+
 private:
   PageNo root_;
+  std::string name_;
 }; // class Database
 } // namespace udb

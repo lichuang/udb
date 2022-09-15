@@ -2,6 +2,7 @@
 #include "buffer/buffer_manager.h"
 #include "buffer/mem_page.h"
 #include "common/debug.h"
+#include "common/string.h"
 #include "storage/btree.h"
 
 namespace udb {
@@ -29,22 +30,25 @@ void Cursor::GetCell() {
   }
 }
 
-Status Cursor::MoveTo(BTree *tree, const Slice &key) {
+Code Cursor::MoveTo(BTree *tree, const Slice &key) {
   Assert(IsReseted());
 
   MemPage *page;
-  Status status;
+  Code code;
   PageNo childNo;
 
   // First initialize the cursor.
+  if (tree_ && tree->Root() != tree_->Root()) {
+    Reset();
+  }
   tree_ = tree;
   key_ = key;
   root_ = tree->Root();
 
   // Second move to the root page of btree.
-  status = MoveToRoot();
-  if (!status.Ok()) {
-    return status;
+  code = MoveToRoot();
+  if (code != kOk) {
+    return code;
   }
 
   // Third search the key in the tree.
@@ -52,9 +56,9 @@ Status Cursor::MoveTo(BTree *tree, const Slice &key) {
     page = page_;
 
     // Search the key in the page
-    status = page->Search(key, this, &childNo);
-    if (!status.Ok()) {
-      return status;
+    code = page->Search(key, this, &childNo, &location_);
+    if (code != kOk) {
+      return code;
     }
 
     // Has reached the leaf page, break out of loop.
@@ -62,20 +66,32 @@ Status Cursor::MoveTo(BTree *tree, const Slice &key) {
       break;
     }
 
-    status = MoveToChild(childNo);
-    if (!status.Ok()) {
+    // check if or not has reached the max depth of tree
+    if (curIndex_ >= kTreeMaxDepth) {
+      return SaveErrorStatus(Status(
+          kCursorOverflow,
+          FormatString("Cursor has overflowed when searching key {} in tree {}",
+                       key.String(), tree_->Name())));
+    }
+
+    code = MoveToChild(childNo);
+    if (code != kOk) {
       break;
     }
   }
 
-  return status;
+  // When out of the loop:
+  // 1. page_ point to the leaf page of the key(if found)
+  // 2. location_ save the match information of the page.
+  // 3. cellIndex_ save the key cell index of the page cell array.
+
+  return code;
 }
 
-Status Cursor::MoveToRoot() {
+Code Cursor::MoveToRoot() {
   Assert(root_ != kInvalidPageNo);
 
-  Status status;
-  MemPage *rootPage;
+  Code code;
 
   // Load the root page of b-tree
 
@@ -84,18 +100,37 @@ Status Cursor::MoveToRoot() {
     page_ = pageStack_[0];
   } else {
     // else load the page from pager
-    status = Pager->GetPage(root_, &page_);
-    if (!status.Ok()) {
-      return status;
+    code = Pager->GetPage(root_, &page_);
+    if (code != kOk) {
+      return code;
     }
-    curIndex_ = 0;
   }
-  rootPage = page_;
-  Assert(rootPage->MemPageNo() == root_);
+  Assert(page_->MemPageNo() == root_);
+  curIndex_ = 0;
+  pageStack_[curIndex_] = page_;
 
-  return status;
+  return code;
+}
+
+Code Cursor::MoveToChild(PageNo chidNo) {
+  Assert(chidNo != kInvalidPageNo);
+
+  Code code;
+
+  code = Pager->GetPage(root_, &page_);
+  if (code != kOk) {
+    return code;
+  }
+  pageStack_[++curIndex_] = page_;
 }
 
 void Cursor::ParseCell() {}
+
+void Cursor::Reset() {
+  root_ = kInvalidPageNo;
+  tree_ = nullptr;
+  page_ = nullptr;
+  curIndex_ = cellIndex_ = -1;
+}
 
 } // namespace udb

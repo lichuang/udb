@@ -129,6 +129,7 @@ static const uint16_t kPageFlagHeaderOffset = 0;
 static const uint16_t kFirstFreeblockHeaderOffset = 1;
 static const uint16_t kCellNumberHeaderOffset = 3;
 static const uint16_t kCellContentHeaderOffset = 5;
+static const uint16_t kRightChildPageNoHeaderOffset = 8;
 
 // Page flags
 static const char kInternalPage = 1;
