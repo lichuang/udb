@@ -56,7 +56,7 @@ Code Cursor::MoveTo(BTree *tree, const Slice &key) {
     page = page_;
 
     // Search the key in the page
-    code = page->Search(key, this, &childNo, &location_);
+    code = page->Search(key, this, &childNo, &location_, &cellIndex_);
     if (code != kOk) {
       return code;
     }

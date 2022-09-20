@@ -34,6 +34,7 @@ public:
   bool IsValid() const { return location_ != Invalid; }
 
   Cell *MutCell() { return &cell_; }
+  MemPage *Page() { return page_; }
 
   int8_t CellIndex() const { return cellIndex_; }
   void GetCell();

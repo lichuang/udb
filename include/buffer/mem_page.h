@@ -27,9 +27,12 @@ public:
   // Search the key in the page.
   // If not reached the leaf page, return child page no in pageNo and kOk.
   // Return error otherwise.
-  Code Search(const Slice &key, Cursor *, PageNo *, CursorLocation *);
+  Code Search(const Slice &key, Cursor *, PageNo *, CursorLocation *,
+              int *cellIndex);
 
   void ParseCell(Cursor *);
+
+  int FreeSpace() const;
 
 private:
   Code ReadPageHeader(char *data, PageNo pageNo);

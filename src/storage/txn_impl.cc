@@ -1,4 +1,5 @@
 #include "storage/txn_impl.h"
+#include "buffer/mem_page.h"
 #include "storage/cursor.h"
 
 namespace udb {
@@ -19,12 +20,14 @@ Status TxnImpl::DeleteTree(const std::string &name) {
 }
 
 Status TxnImpl::Write(BTree *tree, const Slice &key, const Slice &value) {
-  Status status;
   CursorLocation location;
+  Code code;
+  MemPage *page = nullptr;
+  int cellSize = 0;
 
-  status = cursor_->MoveTo(tree, key);
-  if (!status.Ok()) {
-    return status;
+  code = cursor_->MoveTo(tree, key);
+  if (code != kOk) {
+    return GetErrorStatus();
   }
   Assert(cursor_->IsValid());
   location = cursor_->Location();
@@ -38,7 +41,18 @@ Status TxnImpl::Write(BTree *tree, const Slice &key, const Slice &value) {
       return cursor_->Overwrite(key, value);
     }
   }
-  return status;
+
+  page = cursor_->Page();
+  if (page->FreeSpace() <= 0) {
+  }
+
+  // pack key value into tmp space as a cell
+  code = FillInCell(key, value, &tmpSpace[0], &cellSize);
+  if (code != kOk) {
+    return GetErrorStatus();
+  }
+
+  return Status();
 }
 
 Status TxnImpl::Delete(BTree *, const Slice &key) {

@@ -38,10 +38,10 @@ Code MemPage::InitFromPage(Page *page) {
 // If not reached the leaf page, return child page no in pageNo and kOk.
 // Return error otherwise.
 Code MemPage::Search(const Slice &key, Cursor *cursor, PageNo *pageNo,
-                     CursorLocation *location) {
+                     CursorLocation *location, int *cellIndex) {
   Cell cell;
-  Code code;
   int compare;
+  Code code;
 
   *pageNo = kInvalidPageNo;
 
@@ -49,6 +49,9 @@ Code MemPage::Search(const Slice &key, Cursor *cursor, PageNo *pageNo,
 
   // Compare with the low cell of the page.
   code = GetCell(0, &cell);
+  if (code != kOk) {
+    return code;
+  }
   Assert(cell->IsLeafPageCell() == isLeaf_);
   compare = key.Compare(cell.Key(), cell.KeySize());
   if (compare <= 0) {
@@ -60,12 +63,16 @@ Code MemPage::Search(const Slice &key, Cursor *cursor, PageNo *pageNo,
 
   // Compare with the upper cell of the page.
   code = GetCell(cellNum_ - 1, &cell);
+  if (code != kOk) {
+    return code;
+  }
   Assert(cell->IsLeafPageCell() == isLeaf_);
   compare = key.Compare(cell.Key(), cell.KeySize());
   if (compare == 0) {
     // Equal to up bound, move to the left child of last cell.
     *pageNo = cell.LeftChild();
     *location = Equal;
+    *cellIndex = cellNum_ - 1;
     return kOk;
   }
 
@@ -73,6 +80,7 @@ Code MemPage::Search(const Slice &key, Cursor *cursor, PageNo *pageNo,
     // bigger than up bound, move to right child of the page.
     *pageNo = Get4Byte(&data_[headerOffset_ + kRightChildPageNoHeaderOffset]);
     *location = Right;
+    *cellIndex = cellNum_ - 1;
     return kOk;
   }
 
@@ -85,29 +93,26 @@ Code MemPage::Search(const Slice &key, Cursor *cursor, PageNo *pageNo,
   while (low <= high) {
     mid = (high + low) / 2;
     code = GetCell(mid, &cell);
+    if (code != kOk) {
+      return code;
+    }
     Assert(cell->IsLeafPageCell() == isLeaf_);
     compare = key.Compare(cell.Key(), cell.KeySize());
     if (compare == 0) {
       *pageNo = cell.LeftChild();
       *location = Equal;
+      *cellIndex = mid;
       return kOk;
     } else if (compare < 0) {
-      low = mid + 1;
-    } else {
       high = mid - 1;
-    }
-
-    if (low == cellNum_ - 1 || high == 0) {
-      break;
+      *location = Left;
+    } else {
+      low = mid + 1;
+      *location = Right;
     }
   }
 
-  Assert(compare != 0);
-  Assert(low == cellNum_ - 1 && compare < 0);
-  Assert(high == 0 && compare > 0);
-  *pageNo = cell.LeftChild();
-  *location = (compare > 0) ? Left : Right;
-
+  *cellIndex = mid;
   return kOk;
 }
 

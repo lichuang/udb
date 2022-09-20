@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/code.h"
+#include "common/limits.h"
 #include "storage/udb_impl.h"
 
 namespace udb {
@@ -31,9 +33,13 @@ public:
   int LockIndex() const { return lockIndex_; }
 
 private:
+  Code FillInCell(const Slice &key, const Slice &value, char *cell,
+                  int *cellSize);
+
 public:
   bool write_;
   int lockIndex_;
   Cursor *cursor_;
+  char tmpSpace[kPageSize];
 };
 } // namespace udb
